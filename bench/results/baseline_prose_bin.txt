@@ -1,0 +1,16 @@
+fm2-L4 prose_3mb.txt 717172 6.203084442s
+fm2-L5 prose_3mb.txt 703470 17.387057382s
+fm2-L4 bin_10mb.bin 3750460 22.641451897s
+fm2-L5 bin_10mb.bin 3689320 64.772625802s
+bzip2 -9           prose_3mb.txt                  3339697      729930   0.219     13.08     34.93 ok
+zstd -19           prose_3mb.txt                  3339697      711689   0.213      2.35    328.97 ok
+xz -9e             prose_3mb.txt                  3339697      694544   0.208      2.38     74.95 ok
+7z PPMd -mx9       prose_3mb.txt                  3339697      602678   0.180      5.86      5.14 ok
+zpaq -m5           prose_3mb.txt                  3339697      534329   0.160      0.40      0.39 ok
+bzip2 -9           bin_10mb.bin                  10000000     4023904   0.402     13.85     22.67 ok
+zstd -19           bin_10mb.bin                  10000000     3576590   0.358      2.01    304.38 ok
+xz -9e             bin_10mb.bin                  10000000     3403832   0.340      1.88     43.52 ok
+7z PPMd -mx9       bin_10mb.bin                  10000000     3264683   0.326      3.59      3.26 ok
+zpaq -m5           bin_10mb.bin                  10000000     2809305   0.281      0.34      0.34 ok
+
+[exited with code 0]
