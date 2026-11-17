@@ -2,7 +2,7 @@
 # BPL compiler: set BPL=/path/to/bpl (https://github.com/pr0h0/bpl3), needs clang + wasm-ld.
 BPL ?= bpl
 CC ?= gcc
-CFLAGS ?= -O2 -march=native -Wall
+CFLAGS ?= -O3 -march=native -Wall
 
 all: c bpl wasm
 

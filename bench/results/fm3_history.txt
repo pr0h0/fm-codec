@@ -1,0 +1,9 @@
+FEAT=447    text=0.1357(22.0s)  prose=0.1699(7.8s)  bin=0.2791(29.8s)  thumbref_=61340  thumbnail=2451545
+FEAT=2495   text=0.1280(32.2s)  prose=0.1656(11.4s)  bin=0.2661(39.2s)  thumbref_=63125  thumbnail=2482270
+FEAT=2495 LR=12     text=0.1280(34.9s)  prose=0.1656(12.5s)  bin=0.2661(42.3s)
+FEAT=6591 LR=12     text=0.1279(35.9s)  prose=0.1654(12.7s)  bin=0.2662(42.6s)
+FEAT=6591 LR=8      text=0.1265(36.2s)  prose=0.1639(12.5s)  bin=0.2652(42.4s)
+FEAT=2495 LR=6      text=0.1261  prose=0.1633  bin=0.2648
+FEAT=2495 LR=4      text=0.1257  prose=0.1629  bin=0.2649
+image LR=8  thumbref_=60996  style_win=218577  thumbnail=2445117
+image LR=6  thumbref_=60889  style_win=218377  thumbnail=2443180

@@ -1,0 +1,4 @@
+LR=4            text=0.1257  prose=0.1629  bin=0.2649  thumbref_=60817  thumbnail=2442530
+LR=3 LR0=24     text=0.1260  prose=0.1631  bin=0.2650  thumbref_=61457  thumbnail=2444242
+LR=2 LR0=24     text=0.1262  prose=0.1630  bin=0.2656  thumbref_=61415  thumbnail=2447304
+LR=4 LR0=24     text=0.1259  prose=0.1633  bin=0.2648  thumbref_=61509  thumbnail=2443344

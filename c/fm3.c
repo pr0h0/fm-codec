@@ -5,20 +5,24 @@
  *   image: fm2 profile-4 model on nibble buckets (feature bits ignored except 32 = mixer2+APM)
  * env BB = log2(buckets per context table) (default 18 -> 16 MB per table).
  *   fm3 enc bytes IN OUT | fm3 enc image WIDTH IN OUT | fm3 dec IN OUT
- * Header (28 bytes): "FM3\x01" mode u8, bb u8, limit u8, 0 | feat u32 | width u32 | L u64 | pad u32
+ * Header (28 bytes): "FM3\x01" mode u8, bb u8, limit u8, LR u8 | feat u32 | width u32 | L u64 | pad u32
+ * feat bits also record: 64 E8E9 applied, 8192 32-bit mixer (MIXV), 16384 full-size tables (no SMALLT)
  */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 
-#define MAXIN 20
+#define MAXIN 36
 #define NPRED 9
 #define HDR 28
 
 static int SQ_T[33] = {1, 2, 3, 6, 10, 16, 27, 45, 73, 120, 194, 310, 488, 747, 1101, 1546, 2047,
                        2549, 2994, 3348, 3607, 3785, 3901, 3975, 4022, 4050, 4068, 4079, 4085, 4089, 4092, 4093, 4094};
-static int STRETCH[4096], RECIP[256], LR = 20;
+static int STRETCH[4096], RECIP[256], LR = 4, LR0 = 0, LRCUR = 4;
+static int MIXV = 1;
+static int OPT_HUGE = 1, OPT_SMALLT = 1, A2BITS = 18;
 static int squash(int d) {
     if (d > 2047) return 4095;
     if (d < -2047) return 1;
@@ -53,6 +57,14 @@ static inline uint32_t qg(int d) {
     return (uint32_t)((d < 0 ? -q : q) + 8);
 }
 
+static void *big_alloc(size_t n) {
+    void *p = NULL;
+    if (OPT_HUGE && n >= (1u << 21)) {
+        if (posix_memalign(&p, 1u << 21, n)) p = NULL;
+        else madvise(p, n, MADV_HUGEPAGE);
+    }
+    return p ? p : malloc(n);
+}
 /* checksummed 2-way nibble bucket: 16 x u32 = 64 bytes; [0] = check, [1..15] = p16 | n<<16 */
 static inline uint32_t *find_bucket(uint32_t *T, int bb, uint32_t h) {
     uint32_t chk = (h * 0x2545F491u) >> 16;
@@ -63,7 +75,7 @@ static inline uint32_t *find_bucket(uint32_t *T, int bb, uint32_t h) {
     if ((b1[0] & 0xFFFF) == chk) return b1;
     uint32_t *v = ((b0[1] >> 16) & 255) <= ((b1[1] >> 16) & 255) ? b0 : b1;
     v[0] = chk;
-    for (int j = 1; j < 16; j++) v[j] = 32768;
+    for (int j = 1; j < 16; j++) v[j] = 32768 | 1u << 24;
     return v;
 }
 
@@ -83,9 +95,23 @@ static inline int code_bit(Coder *c, int p12, int bit) {
     }
     return bit;
 }
-static inline void upd_w(int32_t *w, const int *st, int n, int e) {
+/* MIXV: 32-bit-only mixer (vectorizes 8-wide): dot = sum((w*st) >> 8) >> 8, |w| <= 2^19 */
+static inline int dot32(const int32_t *w, const int *st, int n) {
+    int32_t s = 0;
+    for (int k = 0; k < n; k++) s += (w[k] * st[k]) >> 8;
+    return s >> 8;
+}
+static inline void upd32(int32_t *w, const int *st, int n, int e) {
+    int el = e * LRCUR;
     for (int k = 0; k < n; k++) {
-        int32_t nw = w[k] + ((st[k] * e * LR) >> 14);
+        int32_t nw = w[k] + ((st[k] * el) >> 14);
+        w[k] = nw > (1 << 19) - 1 ? (1 << 19) - 1 : (nw < -(1 << 19) ? -(1 << 19) : nw);
+    }
+}
+static inline void upd_w(int32_t *w, const int *st, int n, int e) {
+    if (MIXV) { upd32(w, st, n, e); return; }
+    for (int k = 0; k < n; k++) {
+        int32_t nw = w[k] + ((st[k] * e * LRCUR) >> 14);
         w[k] = nw > (1 << 22) ? (1 << 22) : (nw < -(1 << 22) ? -(1 << 22) : nw);
     }
 }
@@ -110,13 +136,30 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, int64_t wi
     int fimgx = img && (feat & 512), fbias = img && (feat & 1024);
     int32_t BS[2187 * 2] = {0};   /* per gradient-context error sum / count (bias cancellation) */
     int nctx = img ? 12 + (fimgx ? 4 : 0) : 6 + (fword ? 2 : 0) + (fhi ? 2 : 0) + (fsparse ? 3 : 0);
-    int nin = nctx + (fmatch ? 1 : 0) + 1;       /* + match input + bias input */
+    int fhist = (feat & 2048) != 0;
+    int nin = nctx * (fhist ? 2 : 1) + (fmatch ? 1 : 0) + 1;       /* (+ history inputs) + match + bias */
+    /* bit-history state maps: per input, 256 history patterns -> P(1) (16-bit) + count */
+    int fhbp = fhist && (feat & 4096);   /* history maps also keyed by bit position */
+    uint32_t *SM = malloc(sizeof(uint32_t) * MAXIN * 2048);   /* p16 | count << 16 */
+    for (int j = 0; j < MAXIN * 2048; j++) SM[j] = 32768;
+    int smi[MAXIN];
     int np = img ? 9 : 0;
-    size_t tsz = (size_t)16 << bb;
+    /* table size per context: low-cardinality contexts get small, cache-resident tables */
+    int tb[MAXIN];
+    static const int TB_IMG[16] = {8, 12, 12, 12, 16, 16, 0, 17, 0, 0, 0, 0, 17, 16, 16, 0};
+    for (int k = 0; k < nctx; k++) tb[k] = bb;
+    if (OPT_SMALLT) {
+        if (img) { for (int k = 0; k < nctx; k++) if (TB_IMG[k] && TB_IMG[k] < bb) tb[k] = TB_IMG[k]; }
+        else {
+            tb[0] = 6; tb[1] = 13 < bb ? 13 : bb;               /* order 0, order 1 */
+            if (fsparse) { int b = 6 + (fhi ? 2 : 0) + (fword ? 2 : 0); tb[b] = 13 < bb ? 13 : bb; tb[b + 2] = 15 < bb ? 15 : bb; }
+        }
+    }
     uint32_t *T[MAXIN];
     for (int k = 0; k < nctx; k++) {
-        T[k] = malloc(tsz * 4);
-        for (size_t j = 0; j < tsz; j++) T[k][j] = (j & 15) ? 32768 : 0;
+        size_t tsz = (size_t)16 << tb[k];
+        T[k] = big_alloc(tsz * 4);
+        for (size_t j = 0; j < tsz; j++) T[k][j] = (j & 15) ? (32768 | 1u << 24) : 0;
     }
     int32_t winit = 19661 * 6 / nin;
     int nsets1 = 8 * 16, nsets2 = 768;
@@ -126,7 +169,7 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, int64_t wi
     int32_t *W3 = malloc(sizeof(int32_t) * 2048 * MAXIN), *WF = malloc(sizeof(int32_t) * 256 * 3);
     for (int j = 0; j < 2048 * MAXIN; j++) W3[j] = winit;
     for (int j = 0; j < 256 * 3; j++) WF[j] = 21845;
-    int napm1 = img ? 256 * 16 * 3 : 65536, napm2 = 1 << 18;
+    int napm1 = img ? 256 * 16 * 3 : 65536, napm2 = 1 << A2BITS;
     uint16_t *A1 = malloc(sizeof(uint16_t) * napm1 * 33), *A2 = malloc(sizeof(uint16_t) * (fapm2 ? napm2 : 1) * 33);
     for (int k = 0; k < napm1; k++) for (int j = 0; j < 33; j++) A1[k * 33 + j] = squash((j - 16) * 128) * 16;
     if (fapm2) for (int k = 0; k < napm2; k++) for (int j = 0; j < 33; j++) A2[k * 33 + j] = squash((j - 16) * 128) * 16;
@@ -252,16 +295,30 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, int64_t wi
             }
             if (!c->dec) { int s = (int8_t)(uint8_t)(data[i] - pred); sym = s >= 0 ? 2 * s : -2 * s - 1; }
         }
+        LRCUR = LR0 > LR ? LR + (int)((int64_t)(LR0 - LR) * 131072 / (131072 + i)) : LR;
         int sel1 = img ? act : (fmsel ? msel : 0);
         uint32_t c0 = 1, node = 1;
         int mmiss = 0;
         for (int bp = 0; bp < 8; bp++) {
             if (bp == 0 || bp == 4) {
-                for (int k = 0; k < nctx; k++) bk[k] = find_bucket(T[k], bb, nib_hash(ctx[k], c0));
+                /* hash every context, request all buckets, then search: the cache misses overlap */
+                uint32_t hk[MAXIN];
+                for (int k = 0; k < nctx; k++) {
+                    hk[k] = nib_hash(ctx[k], c0);
+                    uint32_t i0 = hk[k] >> (32 - tb[k]);
+                    __builtin_prefetch(T[k] + ((size_t)i0 << 4));
+                    __builtin_prefetch(T[k] + ((size_t)(i0 ^ 1) << 4));
+                }
+                for (int k = 0; k < nctx; k++) bk[k] = find_bucket(T[k], tb[k], hk[k]);
                 node = 1;
             }
             int n = 0;
             for (int k = 0; k < nctx; k++) st[n++] = STRETCH[(bk[k][node] & 0xFFFF) >> 4];
+            int smb = fhbp ? bp * 256 : 0;
+            if (fhist) for (int k = 0; k < nctx; k++) {
+                smi[k] = k * 2048 + smb + (int)(bk[k][node] >> 24);
+                st[n++] = STRETCH[(SM[smi[k]] & 0xFFFF) >> 4];
+            }
             int eb = -1, mq = 0;
             if (fmatch) {
                 if (mb >= 0 && !mmiss) {
@@ -274,13 +331,14 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, int64_t wi
             st[n++] = 256;  /* bias */
             int32_t *w1 = W1 + (bp * 16 + sel1) * MAXIN;
             int32_t *w2 = W2 + (img ? ((bp * 3 + ch) * 32 + (ch ? (int)qe(eP, 15) - 49 : 0)) : (int)c0) * MAXIN;
-            int64_t dot = 0;
-            for (int k = 0; k < nin; k++) dot += (int64_t)w1[k] * st[k];
-            int d = (int)(dot >> 16), p1 = clampp(squash(d)), p2 = 0;
+            int d, p2 = 0;
+            if (MIXV) d = dot32(w1, st, nin);
+            else { int64_t dot = 0; for (int k = 0; k < nin; k++) dot += (int64_t)w1[k] * st[k]; d = (int)(dot >> 16); }
+            int p1 = clampp(squash(d));
             if (fmix2) {
-                int64_t dot2 = 0;
-                for (int k = 0; k < nin; k++) dot2 += (int64_t)w2[k] * st[k];
-                int d2 = (int)(dot2 >> 16);
+                int d2;
+                if (MIXV) d2 = dot32(w2, st, nin);
+                else { int64_t dot2 = 0; for (int k = 0; k < nin; k++) dot2 += (int64_t)w2[k] * st[k]; d2 = (int)(dot2 >> 16); }
                 p2 = clampp(squash(d2));
                 d = (d + d2) >> 1;
             }
@@ -288,9 +346,12 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, int64_t wi
             int32_t *w3 = W3 + ((img ? ch * 256 + (int)c0 : (int)((c4 & 0xFF) << 3 | bp)) & 2047) * MAXIN;
             int32_t *wf = WF + (int)c0 * 3;
             if (fmix3) {  /* replace the plain average with a learned final mixer */
-                int64_t dot1 = 0, dot2 = 0, dot3 = 0;
-                for (int k = 0; k < nin; k++) { dot1 += (int64_t)w1[k] * st[k]; dot2 += (int64_t)w2[k] * st[k]; dot3 += (int64_t)w3[k] * st[k]; }
-                dd[0] = (int)(dot1 >> 16); dd[1] = (int)(dot2 >> 16); dd[2] = (int)(dot3 >> 16);
+                if (MIXV) { dd[0] = dot32(w1, st, nin); dd[1] = dot32(w2, st, nin); dd[2] = dot32(w3, st, nin); }
+                else {
+                    int64_t dot1 = 0, dot2 = 0, dot3 = 0;
+                    for (int k = 0; k < nin; k++) { dot1 += (int64_t)w1[k] * st[k]; dot2 += (int64_t)w2[k] * st[k]; dot3 += (int64_t)w3[k] * st[k]; }
+                    dd[0] = (int)(dot1 >> 16); dd[1] = (int)(dot2 >> 16); dd[2] = (int)(dot3 >> 16);
+                }
                 for (int k = 0; k < 3; k++) dd[k] = dd[k] < -2047 ? -2047 : (dd[k] > 2047 ? 2047 : dd[k]);
                 p3 = clampp(squash(dd[2]));
                 int64_t df = (int64_t)wf[0] * dd[0] + (int64_t)wf[1] * dd[1] + (int64_t)wf[2] * dd[2];
@@ -302,7 +363,7 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, int64_t wi
                 int a = img ? (((int)c0 * 16 + act) * 3 + ch) : (int)(c0 | (c4 & 255) << 8);
                 int pa = apm_p(A1, a, d, &ai1, &aw1);
                 if (fapm2) {
-                    int a2 = (int)(((H(77, c4 & 0xFFFF, 0, 0) >> 22) << 8) | c0);
+                    int a2 = (int)(((H(77, c4 & 0xFFFF, 0, 0) >> (40 - A2BITS)) << 8) | c0);
                     int pb = apm_p(A2, a2, d, &ai2, &aw2);
                     p12 = (2 * p12 + 3 * pa + 3 * pb) >> 3;
                 } else p12 = (p12 + 3 * pa) >> 2;
@@ -317,11 +378,18 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, int64_t wi
                 if (fapm2) apm_upd(A2, ai2, aw2, bit);
             }
             for (int k = 0; k < nctx; k++) {
-                uint32_t e = bk[k][node], p = e & 0xFFFF, cnt = (e >> 16) & 255;
+                uint32_t e = bk[k][node], p = e & 0xFFFF, cnt = (e >> 16) & 255, hb = e >> 24;
+                /* RECIP[n] < 2/3 * 32768, so p stays within 0..65535 without clamping */
                 int np2 = (int)p + (((((int)bit << 16) - (int)p) * RECIP[cnt]) >> 15);
-                np2 = np2 < 0 ? 0 : (np2 > 65535 ? 65535 : np2);
                 if ((int)cnt < limit) cnt++;
-                bk[k][node] = (uint32_t)np2 | cnt << 16;
+                if (fhist) {
+                    uint32_t sv = SM[smi[k]]; int sp = sv & 0xFFFF, sn = sv >> 16;
+                    sp += (((bit << 16) - sp) * RECIP[sn]) >> 15;
+                    SM[smi[k]] = (uint32_t)sp | (uint32_t)(sn < 255 ? sn + 1 : 255) << 16;
+                }
+                hb = (hb << 1) | bit;           /* shift in bit, keep a length sentinel, max 7 bits */
+                if (hb >= 256) hb = (hb & 0x7F) | 0x80;
+                bk[k][node] = (uint32_t)np2 | cnt << 16 | hb << 24;
             }
             if (eb >= 0) {
                 int ok = bit == eb, cnt = MN[mq];
@@ -354,7 +422,7 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, int64_t wi
         }
     }
     for (int k = 0; k < nctx; k++) free(T[k]);
-    free(W1); free(W2); free(W3); free(WF); free(A1); free(A2); free(MT); free(err); free(perr);
+    free(W1); free(W2); free(W3); free(WF); free(SM); free(A1); free(A2); free(MT); free(err); free(perr);
 }
 
 static int e8e9_detect(const uint8_t *d, int64_t n) {
@@ -392,7 +460,14 @@ int main(int argc, char **argv) {
         int bb = getenv("BB") ? atoi(getenv("BB")) : 18, limit = getenv("LIMIT") ? atoi(getenv("LIMIT")) : 255;
         uint8_t *data = slurp(in, &L);
         if (getenv("LR")) LR = atoi(getenv("LR"));
-        feat &= ~64u;
+        if (getenv("LR0")) LR0 = atoi(getenv("LR0"));
+        if (getenv("HUGE")) OPT_HUGE = atoi(getenv("HUGE"));
+        if (getenv("SMALLT")) OPT_SMALLT = atoi(getenv("SMALLT"));
+        if (getenv("A2BITS")) A2BITS = atoi(getenv("A2BITS"));
+        if (getenv("MIXV")) MIXV = atoi(getenv("MIXV"));
+        feat &= ~(64u | 8192u | 16384u);
+        if (MIXV) feat |= 8192;
+        if (!OPT_SMALLT) feat |= 16384;
         if (mode == 1 && (getenv("E8") ? atoi(getenv("E8")) : 1) && e8e9_detect(data, L)) { e8e9(data, L, 1); feat |= 64; }
         Coder c = {0, 0xFFFFFFFFu, 0, NULL, 0, 0, 0, 0};
         for (int i = 0; i < HDR; i++) emit(&c, 0);
@@ -400,7 +475,7 @@ int main(int argc, char **argv) {
         for (int i = 3; i >= 0; i--) emit(&c, c.x1 >> (8 * i));
         while (c.len > HDR && c.buf[c.len - 1] == 0) c.len--;
         uint8_t *h = c.buf;
-        memcpy(h, "FM3\x01", 4); h[4] = mode; h[5] = bb; h[6] = limit; h[7] = 0;
+        memcpy(h, "FM3\x01", 4); h[4] = mode; h[5] = bb; h[6] = limit; h[7] = (uint8_t)LR;
         put32(h + 8, feat); put32(h + 12, (uint32_t)width); put32(h + 16, (uint32_t)L); put32(h + 20, (uint32_t)((uint64_t)L >> 32));
         FILE *f = fopen(out, "wb"); fwrite(c.buf, 1, c.len, f); fclose(f);
         return 0;
@@ -413,7 +488,9 @@ int main(int argc, char **argv) {
         uint8_t *data = malloc(L ? L : 1);
         Coder c = {0, 0xFFFFFFFFu, 0, f + HDR, n - HDR, 0, 0, 1};
         for (int i = 0; i < 4; i++) c.x = (c.x << 8) | (c.pos < c.len ? c.buf[c.pos] : 0), c.pos++;
-        if (getenv("LR")) LR = atoi(getenv("LR"));
+        LR = f[7]; MIXV = (feat & 8192) != 0; OPT_SMALLT = !(feat & 16384);
+        if (getenv("HUGE")) OPT_HUGE = atoi(getenv("HUGE"));
+        if (getenv("A2BITS")) A2BITS = atoi(getenv("A2BITS"));
         run(&c, mode, bb, limit, feat, width, data, L);
         if (feat & 64) e8e9(data, L, 0);
         FILE *o = fopen(argv[3], "wb"); fwrite(data, 1, L, o); fclose(o);
