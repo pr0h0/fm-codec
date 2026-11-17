@@ -36,10 +36,12 @@ global IB: *u8 = nullptr;
 global IB_CAP: long = 0;
 global RESULT: *u8 = nullptr;
 
+@[unchecked]
 frame ptrAdd(p: *u8, off: long) ret *u8 {
     return cast<*u8>(cast<long>(p) + off);
 }
 
+@[unchecked]
 frame squash(d: int) ret int {
     if (d > 2047) {
         return 4095;
@@ -79,6 +81,7 @@ frame initTables() {
     }
 }
 
+@[unchecked]
 frame hash4(k: uint, a: uint, b: uint, c: uint) ret uint {
     local h: uint = (k + cast<uint>(1)) * cast<uint>(0x9E3779B1);
     h = (h ^ a) * cast<uint>(0x85EBCA6B);
@@ -90,6 +93,7 @@ frame hash4(k: uint, a: uint, b: uint, c: uint) ret uint {
     return h;
 }
 
+@[unchecked]
 frame nibHash(ctx: uint, c0: uint) ret uint {
     local x: uint = ctx + c0 * cast<uint>(0x9E3779B1);
     x = x ^ (x >> 15);
@@ -100,6 +104,7 @@ frame nibHash(ctx: uint, c0: uint) ret uint {
     return x;
 }
 
+@[unchecked]
 frame clamp255(v: int) ret int {
     if (v < 0) {
         return 0;
@@ -110,6 +115,7 @@ frame clamp255(v: int) ret int {
     return v;
 }
 
+@[unchecked]
 frame clampp(p: int) ret int {
     if (p < 1) {
         return 1;
@@ -120,11 +126,13 @@ frame clampp(p: int) ret int {
     return p;
 }
 
+@[unchecked]
 frame iabs(v: int) ret int {
     return (v < 0) ? -v : v;
 }
 
 # bit length of v in 0..1020 (branches only: a loop would add a stack guard)
+@[unchecked]
 frame bitlen10(v: int) ret int {
     if (v >= 512) {
         return 10;
@@ -159,6 +167,7 @@ frame bitlen10(v: int) ret int {
     return 0;
 }
 
+@[unchecked]
 frame qe(e: int, lim: int) ret uint {
     local v: int = e;
     if (v < -lim) {
@@ -170,6 +179,7 @@ frame qe(e: int, lim: int) ret uint {
     return cast<uint>(v + 64);
 }
 
+@[unchecked]
 frame qg(d: int) ret uint {
     local a: int = iabs(d);
     local q: int = 4;
@@ -188,6 +198,7 @@ frame qg(d: int) ret uint {
     return cast<uint>(q + 8);
 }
 
+@[unchecked]
 frame clampW(v: int) ret int {
     if (v > 524287) {
         return 524287;
@@ -198,6 +209,7 @@ frame clampW(v: int) ret int {
     return v;
 }
 
+@[unchecked]
 frame clamp2047(v: int) ret int {
     if (v > 2047) {
         return 2047;
@@ -208,6 +220,7 @@ frame clamp2047(v: int) ret int {
     return v;
 }
 
+@[unchecked]
 frame lenBucket(m: long) ret int {
     if (m < 16) {
         return cast<int>(m);
@@ -219,6 +232,7 @@ frame lenBucket(m: long) ret int {
     return 16 + cast<int>(q);
 }
 
+@[unchecked]
 frame emitByte(b: u8) {
     if (G_LEN < G_CAP) {
         G_BUF[G_LEN] = b;
@@ -228,6 +242,7 @@ frame emitByte(b: u8) {
     G_LEN = G_LEN + 1;
 }
 
+@[unchecked]
 frame nextByte() ret uint {
     local b: uint = 0;
     if (G_POS < G_LEN) {
@@ -249,12 +264,14 @@ frame arenaReset(total: long) {
     AR_USED = 0;
 }
 
+@[unchecked]
 frame arenaTake(n: long) ret *u8 {
     local p: *u8 = ptrAdd(AR_BASE, AR_USED);
     AR_USED = AR_USED + ((n + 63) / 64) * 64;
     return p;
 }
 
+@[unchecked]
 frame hasF(feat: uint, bit: uint) ret bool {
     return (feat & bit) != cast<uint>(0);
 }
@@ -1147,6 +1164,7 @@ frame run(mode: int, bb: int, limit: int, feat: uint, width: long, data: *u8, L:
 }
 
 # ---- E8/E9 x86 transform ----
+@[unchecked]
 frame e8e9Detect(d: *u8, n: long) ret bool {
     local cnt: long = 0;
     local good: long = 0;
@@ -1161,6 +1179,7 @@ frame e8e9Detect(d: *u8, n: long) ret bool {
     return cnt > n / 256 && good * 2 > cnt;
 }
 
+@[unchecked]
 frame e8e9(d: *u8, n: long, fwd: bool) {
     local i: long = 0;
     loop (i + 4 < n) {

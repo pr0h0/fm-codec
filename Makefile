@@ -1,12 +1,13 @@
 # Builds the C reference, the BPL native CLI and the BPL WebAssembly module.
-# BPL compiler: set BPL=/path/to/bpl (https://github.com/pr0h0/bpl3), needs clang + wasm-ld.
+# BPL compiler: set BPL=/path/to/bpl (https://github.com/pr0h0/bpl3, needs @[unchecked]: > 0.1.3), needs clang + wasm-ld.
 BPL ?= bpl
 CC ?= gcc
 CFLAGS ?= -O3 -march=native -Wall
 
 all: c bpl wasm bpl3 wasm3
 
-c: c/fm3 c/fm2 c/fm c/fmx
+c: c/fm4 c/fm3 c/fm2 c/fm c/fmx
+c/fm4: c/fm4.c ; $(CC) $(CFLAGS) -ffp-contract=off -o $@ $< -lm
 c/fm3: c/fm3.c ; $(CC) $(CFLAGS) -o $@ $<
 c/fm2: c/fm2.c ; $(CC) $(CFLAGS) -o $@ $<
 c/fm: c/fm.c ; $(CC) $(CFLAGS) -o $@ $<
