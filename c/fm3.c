@@ -4,7 +4,7 @@
  *          16 extra orders (5, 7)   32 second mixer + APM1 (as fm2 profile 4)
  *   image: fm2 profile-4 model on nibble buckets (feature bits ignored except 32 = mixer2+APM)
  * env BB = log2(buckets per context table) (default 18 -> 16 MB per table).
- *   fm3 enc bytes IN OUT | fm3 enc image WIDTH IN OUT | fm3 dec IN OUT
+ *   fm3 enc LEVEL bytes IN OUT | fm3 enc LEVEL image WIDTH IN OUT | fm3 dec IN OUT
  * Header (28 bytes): "FM3\x01" mode u8, bb u8, limit u8, LR u8 | feat u32 | width u32 | L u64 | pad u32
  * feat bits also record: 64 E8E9 applied, 8192 32-bit mixer (MIXV), 16384 full-size tables (no SMALLT)
  */
@@ -136,6 +136,7 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, int64_t wi
     int fimgx = img && (feat & 512), fbias = img && (feat & 1024);
     int find = !img && (feat & 32768), fmapm = !img && fmatch && fmix2 && (feat & 65536);
     int fm2nd = !img && fmatch && (feat & 131072), fcol = !img && (feat & 262144);
+    int fblend1 = img && (feat & (1u << 20)), flite = (feat & (1u << 21)) != 0;
     uint32_t *MT2 = fm2nd ? calloc((size_t)1 << MBITS, 4) : NULL;
     int64_t mptr2 = 0, mlen2 = 0, linestart = 0, prevline = 0;
     uint32_t w2 = 0;
@@ -144,7 +145,8 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, int64_t wi
     uint16_t *A3 = fmapm ? malloc(sizeof(uint16_t) * 65536 * 33) : NULL;
     if (fmapm) for (int k = 0; k < 65536; k++) for (int j = 0; j < 33; j++) A3[k * 33 + j] = squash((j - 16) * 128) * 16;
     int32_t BS[2187 * 2] = {0};   /* per gradient-context error sum / count (bias cancellation) */
-    int nctx = img ? 12 + (fimgx ? 4 : 0) : 6 + (fword ? 2 : 0) + (fhi ? 2 : 0) + (fsparse ? 3 : 0) + (find ? 2 : 0) + (fcol ? 2 : 0);
+    int nord = flite ? 3 : 6 + (fhi ? 2 : 0);
+    int nctx = img ? (flite ? 6 : 12 + (fimgx ? 4 : 0)) : nord + (fword ? 2 : 0) + (fsparse ? 3 : 0) + (find ? 2 : 0) + (fcol ? 2 : 0);
     int fhist = (feat & 2048) != 0;
     int nin = nctx * (fhist ? 2 : 1) + (fmatch ? 1 : 0) + (fm2nd ? 1 : 0) + 1;  /* (+ history) + match(es) + bias */
     /* bit-history state maps: per input, 256 history patterns -> P(1) (16-bit) + count */
@@ -152,7 +154,7 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, int64_t wi
     uint32_t *SM = malloc(sizeof(uint32_t) * MAXIN * 2048);   /* p16 | count << 16 */
     for (int j = 0; j < MAXIN * 2048; j++) SM[j] = 32768;
     int smi[MAXIN];
-    int np = img ? 9 : 0;
+    int np = img && !flite ? 9 : 0;
     /* table size per context: low-cardinality contexts get small, cache-resident tables */
     int tb[MAXIN];
     static const int TB_IMG[16] = {8, 12, 12, 12, 16, 16, 0, 17, 0, 0, 0, 0, 17, 16, 16, 0};
@@ -160,8 +162,9 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, int64_t wi
     if (OPT_SMALLT) {
         if (img) { for (int k = 0; k < nctx; k++) if (TB_IMG[k] && TB_IMG[k] < bb) tb[k] = TB_IMG[k]; }
         else {
-            tb[0] = 6; tb[1] = 13 < bb ? 13 : bb;               /* order 0, order 1 */
-            if (fsparse) { int b = 6 + (fhi ? 2 : 0) + (fword ? 2 : 0); tb[b] = 13 < bb ? 13 : bb; tb[b + 2] = 15 < bb ? 15 : bb; }
+            if (flite) tb[0] = 13 < bb ? 13 : bb;                 /* order 1 */
+            else { tb[0] = 6; tb[1] = 13 < bb ? 13 : bb; }      /* order 0, order 1 */
+            if (fsparse) { int b = nord + (fword ? 2 : 0); tb[b] = 13 < bb ? 13 : bb; tb[b + 2] = 15 < bb ? 15 : bb; }
         }
     }
     uint32_t *T[MAXIN];
@@ -198,27 +201,27 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, int64_t wi
         int ch = 0, act = 0, eP = 0, pred = 0, sym = 0, pr[NPRED], bctx = 0, predRaw = 0;
         int mb = -1, lenq = 0, msel = 0, mb2 = -1, lenq2 = 0, mmiss2 = 0;
         if (!img) {
-            for (int k = 0; k < 6 + (fhi ? 2 : 0); k++) {
-                int o = ORD[k];
+            for (int k = 0; k < nord; k++) {
+                int o = flite ? k + 1 : ORD[k];
                 uint32_t m = o >= 4 ? 0xFFFFFFFFu : ((1u << (8 * o)) - 1);
                 uint32_t hi = o == 6 ? (c8 & 0xFFFF) : o == 5 ? (c8 & 0xFF) : o == 7 ? (c8 & 0xFFFFFF) : 0;
                 ctx[k] = H(o, c4 & m, hi, 0);
             }
-            if (fword) { int b = 6 + (fhi ? 2 : 0); ctx[b] = H(30, w0, 0, 0); ctx[b + 1] = H(31, w0, w1, 0); }
+            if (fword) { int b = nord; ctx[b] = H(30, w0, 0, 0); ctx[b + 1] = H(31, w0, w1, 0); }
             if (fsparse) {
-                int b = 6 + (fhi ? 2 : 0) + (fword ? 2 : 0);
+                int b = nord + (fword ? 2 : 0);
                 ctx[b] = H(40, (c4 >> 8) & 0xFF, 0, 0);          /* byte i-2 alone */
                 ctx[b + 1] = H(41, (c4 >> 16) & 0xFFFF, 0, 0);   /* bytes i-3,i-4 */
                 ctx[b + 2] = H(42, (uint32_t)(i & 3), c4 & 0xFF, 0); /* 4-byte alignment + last byte */
             }
             if (find) {   /* indirect: what followed this order-1 / order-2 context the last two times */
-                int b = 6 + (fhi ? 2 : 0) + (fword ? 2 : 0) + (fsparse ? 3 : 0);
+                int b = nord + (fword ? 2 : 0) + (fsparse ? 3 : 0);
                 uint32_t h2 = H(52, c4 & 0xFFFF, 0, 0) >> 10;
                 ctx[b] = H(50, c4 & 0xFF, IND1[c4 & 0xFFFF & 0xFF] | 0, 0);
                 ctx[b + 1] = H(51, c4 & 0xFFFF, IND2[h2], 0);
             }
             if (fcol) {   /* column: char above in the previous line; word pair */
-                int b = 6 + (fhi ? 2 : 0) + (fword ? 2 : 0) + (fsparse ? 3 : 0) + (find ? 2 : 0);
+                int b = nord + (fword ? 2 : 0) + (fsparse ? 3 : 0) + (find ? 2 : 0);
                 int64_t col = i - linestart, ab = prevline + col;
                 uint32_t above = ab < linestart ? data[ab] : 0;
                 ctx[b] = H(60, above, (uint32_t)(col > 255 ? 255 : col), c4 & 0xFF);
@@ -279,6 +282,8 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, int64_t wi
             int NNv = hasNN ? data[iN - stride] : Nv;
             int mx = Wv > Nv ? Wv : Nv, mn = Wv < Nv ? Wv : Nv;
             pr[0] = NWv >= mx ? mn : (NWv <= mn ? mx : Wv + Nv - NWv);
+            pred = pr[0];
+            if (np) {
             pr[1] = clamp255(Wv + Nv - NWv);
             pr[2] = (Wv + NEv + 1) >> 1;
             pr[3] = clamp255(Nv + ((Wv - NWv + NEv - Nv) >> 1));
@@ -299,10 +304,11 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, int64_t wi
                 if (hasN) s += perr[iN * np + k];
                 if (hasN && hasW) s += perr[iNW * np + k];
                 if (hasNE) s += perr[iNE * np + k];
-                int64_t w = (1LL << 24) / ((int64_t)s * s);
+                int64_t w = fblend1 ? (1LL << 24) / s : (1LL << 24) / ((int64_t)s * s);
                 num += w * pr[k]; den += w;
             }
             pred = (int)((num + den / 2) / den);
+            }
             if (fbias) {
                 bctx = (((int)qg(Wv - NWv) - 4) * 9 + ((int)qg(Nv - NWv) - 4)) * 9 + ((int)qg(NEv - Nv) - 4);
                 bctx = bctx * 3 + ch;
@@ -322,12 +328,14 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, int64_t wi
             ctx[3] = H(13, chv, qp, ch ? 0 : 99);
             ctx[4] = H(14, chv, qe(eW, 12), qe(eN, 12));
             ctx[5] = H(15, chv, qp, act);
+            if (!flite) {
             ctx[6] = H(16, chv, qe(eNW, 8) * 256 + qe(eNE, 8), act);
             ctx[7] = H(17, chv, qg(Wv - NWv) * 16 + qg(Nv - NWv), qg(NEv - Nv));
             ctx[8] = H(18, chv, ch ? qe(eP, 20) * 256 + qe(eP2, 20) : 255, pred >> 5);
             ctx[9] = H(19, chv, qe(pr[0] - pred, 24) * 256 + qe(pr[4] - pred, 24), 0);
             ctx[10] = H(20, chv, qe(pr[2] - pred, 24) * 256 + qe(pr[3] - pred, 24), 0);
             ctx[11] = H(21, chv, qe(Wv - pred, 24) * 256 + qe(Nv - pred, 24), qe(NEv - pred, 24));
+            }
             if (fimgx) {
                 int eWW = hasWW ? err[i - 6] : 0, eNN = hasNN ? err[iN - stride] : 0;
                 ctx[12] = H(22, chv, (uint32_t)(Wv >> 3), (uint32_t)(Nv >> 3));
@@ -521,34 +529,84 @@ static uint8_t *slurp(const char *path, int64_t *n) {
     if ((int64_t)fread(b, 1, *n, f) != *n) { perror("read"); exit(1); }
     fclose(f); return b;
 }
+/* encode one candidate into a malloc'd container */
+static uint8_t *encode_one(int mode, int bb, int limit, uint32_t feat, int64_t width, uint8_t *data, int64_t L, int64_t *outLen) {
+    Coder c = {0, 0xFFFFFFFFu, 0, NULL, 0, 0, 0, 0};
+    for (int i = 0; i < HDR; i++) emit(&c, 0);
+    run(&c, mode, bb, limit, feat, width, data, L);
+    for (int i = 3; i >= 0; i--) emit(&c, c.x1 >> (8 * i));
+    while (c.len > HDR && c.buf[c.len - 1] == 0) c.len--;
+    uint8_t *h = c.buf;
+    memcpy(h, "FM3\x01", 4); h[4] = mode; h[5] = bb; h[6] = limit; h[7] = (uint8_t)LR;
+    put32(h + 8, feat); put32(h + 12, (uint32_t)width); put32(h + 16, (uint32_t)L); put32(h + 20, (uint32_t)((uint64_t)L >> 32));
+    *outLen = c.len;
+    return c.buf;
+}
+
+/* Levels: candidate (feat, bb) per level; >1 candidate = one pass each, smallest wins.
+ *   bytes 1: orders 1-3 + match          2: orders 0-4,6 + match + words + mixer2/APM
+ *         3: + order-2 APM, sparse, indirect, match APM, 2nd match, column/word-pair
+ *         4: + bit-history inputs, orders 5/7, 3-mixer network     5: level 4 with 2x tables
+ *   image 1: MED + 6 contexts            2: 9-predictor blend + 12 contexts
+ *         3: + mixer2/APM                 4: + 4 contexts + 3-mixer network
+ *         5: level 4, blend weight 1/err and 1/err^2 both tried */
+#define B_L1 ((1u << 21) | 1 | 4)
+#define B_L2 (1u | 2 | 4 | 32)
+#define B_L3 (B_L2 | 8 | 128 | 32768 | 65536 | 131072 | 262144)
+#define B_L4 (B_L3 | 16 | 256 | 2048)
+#define I_L1 (1u << 21)
+#define I_L2 (1u << 20)
+#define I_L3 (I_L2 | 32)
+#define I_L4 (I_L3 | 256 | 512)
+static uint8_t *fm3_encode(int level, int mode, int64_t width, uint8_t *data, int64_t L, int64_t *outLen) {
+    uint32_t cf[3] = {0, 0, 0}; int cbb[3] = {18, 18, 18}, nc = 0;
+    if (getenv("FEAT")) { cf[0] = (uint32_t)atoi(getenv("FEAT")); nc = 1; }
+    else if (level >= 1 && level <= 5) {
+        static const uint32_t BL[6] = {0, B_L1, B_L2, B_L3, B_L4, B_L4}, IL[6] = {0, I_L1, I_L2, I_L3, I_L4, I_L4};
+        cf[0] = mode == 2 ? IL[level] : BL[level]; nc = 1;
+        if (level == 5 && mode == 1) cbb[0] = 19;
+        if (level == 5 && mode == 2) { cf[1] = I_L4 & ~(1u << 20); nc = 2; }
+    }
+    if (getenv("BB")) for (int k = 0; k < 3; k++) cbb[k] = atoi(getenv("BB"));
+    int limit = getenv("LIMIT") ? atoi(getenv("LIMIT")) : 255;
+    uint32_t xf = MIXV ? 8192 : 0;
+    if (!OPT_SMALLT) xf |= 16384;
+    if (nc && mode == 1 && (getenv("E8") ? atoi(getenv("E8")) : 1) && e8e9_detect(data, L)) { e8e9(data, L, 1); xf |= 64; }
+    uint8_t *best = NULL; int64_t bestLen = 0;
+    for (int k = 0; k < nc; k++) {
+        int64_t n; uint8_t *o = encode_one(mode, cbb[k], limit, (cf[k] & ~(64u | 8192u | 16384u)) | xf, width, data, L, &n);
+        if (!best || n < bestLen) { free(best); best = o; bestLen = n; } else free(o);
+    }
+    if (xf & 64) e8e9(data, L, 0);
+    if (!best || bestLen >= L + HDR) {   /* store */
+        free(best);
+        best = malloc(L + HDR);
+        memcpy(best, "FM3\x01", 4); best[4] = 0; best[5] = best[6] = best[7] = 0;
+        put32(best + 8, 0); put32(best + 12, (uint32_t)width); put32(best + 16, (uint32_t)L); put32(best + 20, (uint32_t)((uint64_t)L >> 32));
+        memcpy(best + HDR, data, L); bestLen = L + HDR;
+    }
+    *outLen = bestLen;
+    return best;
+}
+
 int main(int argc, char **argv) {
     init_tables();
-    if (argc >= 5 && !strcmp(argv[1], "enc")) {
-        int mode = !strcmp(argv[2], "image") ? 2 : 1;
-        int64_t width = mode == 2 ? atoll(argv[3]) : 0, L;
-        const char *in = argv[mode == 2 ? 4 : 3], *out = argv[mode == 2 ? 5 : 4];
-        uint32_t feat = getenv("FEAT") ? (uint32_t)atoi(getenv("FEAT")) : 63;
-        int bb = getenv("BB") ? atoi(getenv("BB")) : 18, limit = getenv("LIMIT") ? atoi(getenv("LIMIT")) : 255;
-        uint8_t *data = slurp(in, &L);
+    if (getenv("HUGE")) OPT_HUGE = atoi(getenv("HUGE"));
+    if (getenv("A2BITS")) A2BITS = atoi(getenv("A2BITS"));
+    if (argc >= 6 && !strcmp(argv[1], "enc")) {
+        int level = atoi(argv[2]), mode = !strcmp(argv[3], "image") ? 2 : 1;
+        int64_t width = mode == 2 ? atoll(argv[4]) : 0, L, n;
+        if (level < 0 || level > 5 || (mode == 2 && argc < 7)) goto usage;
+        const char *in = argv[mode == 2 ? 5 : 4], *out = argv[mode == 2 ? 6 : 5];
         if (getenv("LR")) LR = atoi(getenv("LR"));
         if (getenv("LR0")) LR0 = atoi(getenv("LR0"));
-        if (getenv("HUGE")) OPT_HUGE = atoi(getenv("HUGE"));
         if (getenv("SMALLT")) OPT_SMALLT = atoi(getenv("SMALLT"));
-        if (getenv("A2BITS")) A2BITS = atoi(getenv("A2BITS"));
         if (getenv("MIXV")) MIXV = atoi(getenv("MIXV"));
-        feat &= ~(64u | 8192u | 16384u);
-        if (MIXV) feat |= 8192;
-        if (!OPT_SMALLT) feat |= 16384;
-        if (mode == 1 && (getenv("E8") ? atoi(getenv("E8")) : 1) && e8e9_detect(data, L)) { e8e9(data, L, 1); feat |= 64; }
-        Coder c = {0, 0xFFFFFFFFu, 0, NULL, 0, 0, 0, 0};
-        for (int i = 0; i < HDR; i++) emit(&c, 0);
-        run(&c, mode, bb, limit, feat, width, data, L);
-        for (int i = 3; i >= 0; i--) emit(&c, c.x1 >> (8 * i));
-        while (c.len > HDR && c.buf[c.len - 1] == 0) c.len--;
-        uint8_t *h = c.buf;
-        memcpy(h, "FM3\x01", 4); h[4] = mode; h[5] = bb; h[6] = limit; h[7] = (uint8_t)LR;
-        put32(h + 8, feat); put32(h + 12, (uint32_t)width); put32(h + 16, (uint32_t)L); put32(h + 20, (uint32_t)((uint64_t)L >> 32));
-        FILE *f = fopen(out, "wb"); fwrite(c.buf, 1, c.len, f); fclose(f);
+        uint8_t *data = slurp(in, &L);
+        if (mode == 2 && (width <= 0 || L % (3 * width))) { fprintf(stderr, "bad width\n"); return 1; }
+        uint8_t *o = fm3_encode(level, mode, width, data, L, &n);
+        FILE *f = fopen(out, "wb"); if (!f) { perror(out); return 1; }
+        fwrite(o, 1, n, f); fclose(f);
         return 0;
     }
     if (argc == 4 && !strcmp(argv[1], "dec")) {
@@ -557,16 +615,20 @@ int main(int argc, char **argv) {
         int mode = f[4], bb = f[5], limit = f[6]; uint32_t feat = get32(f + 8);
         int64_t width = get32(f + 12), L = (int64_t)get32(f + 16) | (int64_t)get32(f + 20) << 32;
         uint8_t *data = malloc(L ? L : 1);
-        Coder c = {0, 0xFFFFFFFFu, 0, f + HDR, n - HDR, 0, 0, 1};
-        for (int i = 0; i < 4; i++) c.x = (c.x << 8) | (c.pos < c.len ? c.buf[c.pos] : 0), c.pos++;
-        LR = f[7]; MIXV = (feat & 8192) != 0; OPT_SMALLT = !(feat & 16384);
-        if (getenv("HUGE")) OPT_HUGE = atoi(getenv("HUGE"));
-        if (getenv("A2BITS")) A2BITS = atoi(getenv("A2BITS"));
-        run(&c, mode, bb, limit, feat, width, data, L);
-        if (feat & 64) e8e9(data, L, 0);
-        FILE *o = fopen(argv[3], "wb"); fwrite(data, 1, L, o); fclose(o);
+        if (mode == 0) memcpy(data, f + HDR, L);
+        else {
+            LR = f[7]; MIXV = (feat & 8192) != 0; OPT_SMALLT = !(feat & 16384);
+            Coder c = {0, 0xFFFFFFFFu, 0, f + HDR, n - HDR, 0, 0, 1};
+            for (int i = 0; i < 4; i++) c.x = (c.x << 8) | (c.pos < c.len ? c.buf[c.pos] : 0), c.pos++;
+            run(&c, mode, bb, limit, feat, width, data, L);
+            if (feat & 64) e8e9(data, L, 0);
+        }
+        FILE *o = fopen(argv[3], "wb"); if (!o) { perror(argv[3]); return 1; }
+        fwrite(data, 1, L, o); fclose(o);
         return 0;
     }
-    fprintf(stderr, "usage: fm3 enc bytes IN OUT | fm3 enc image WIDTH IN OUT | fm3 dec IN OUT  (env FEAT, BB, LIMIT)\n");
+usage:
+    fprintf(stderr, "usage: fm3 enc LEVEL(0-5) bytes IN OUT | fm3 enc LEVEL image WIDTH IN OUT | fm3 dec IN OUT\n"
+                    "       (env FEAT overrides the level's feature set; BB, LIMIT, LR for experiments)\n");
     return 2;
 }

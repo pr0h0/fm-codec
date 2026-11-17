@@ -6,7 +6,8 @@ CFLAGS ?= -O3 -march=native -Wall
 
 all: c bpl wasm
 
-c: c/fm2 c/fm c/fmx
+c: c/fm3 c/fm2 c/fm c/fmx
+c/fm3: c/fm3.c ; $(CC) $(CFLAGS) -o $@ $<
 c/fm2: c/fm2.c ; $(CC) $(CFLAGS) -o $@ $<
 c/fm: c/fm.c ; $(CC) $(CFLAGS) -o $@ $<
 c/fmx: c/fmx.c ; $(CC) $(CFLAGS) -o $@ $<
