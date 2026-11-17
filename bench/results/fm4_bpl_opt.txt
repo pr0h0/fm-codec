@@ -1,0 +1,53 @@
+fm4 BPL port: before / after optimization (output byte-identical to c/fm4.c before and after)
+date: 2026-11-17   cpu: Intel(R) Core(TM) i7-6700 CPU @ 3.40GHz   clang 18.1.3, gcc -O3 -march=native, node v24.20.0
+user seconds (/usr/bin/time -f %U), min of 3 interleaved runs
+before = commit cff7549 (bpl build -O 3 --march native); after = this tree, same flags
+
+native encode                        C   before    after   before/C  after/C
+text_1mb (bytes)             L1    0.46    0.49    0.47     1.07x    1.02x
+text_1mb (bytes)             L4    3.21    3.94    2.48     1.23x    0.77x
+text_1mb (bytes)             L5    4.17    4.96    4.16     1.19x    1.00x
+style_win_library (512)      L2    0.50    0.60    0.40     1.20x    0.80x
+style_win_library (512)      L4    1.26    1.33    0.95     1.06x    0.75x
+img15_png_1024 (1024)        L4    7.78    7.86    5.89     1.01x    0.76x
+
+native decode                        C   before    after   before/C  after/C
+text_1mb (bytes)             L1    0.46    0.49    0.45     1.07x    0.98x
+text_1mb (bytes)             L4    3.21    3.93    2.47     1.22x    0.77x
+text_1mb (bytes)             L5    4.26    4.97    4.18     1.17x    0.98x
+style_win_library (512)      L2    0.50    0.61    0.43     1.22x    0.86x
+style_win_library (512)      L4    1.27    1.39    0.95     1.09x    0.75x
+img15_png_1024 (1024)        L4    7.81    7.88    5.87     1.01x    0.75x
+
+wasm encode, FRESH node process per run (whole process incl. startup and compile threads), no flags
+                                   before    after   after, SIMD build (make wasm4simd)
+text_1mb (bytes)             L4    15.17     7.44     5.14
+style_win_library (512)      L4     4.34     2.35     1.99
+
+reference ceiling: optimizing compiler from the first instruction (node --no-liftoff)
+text_1mb (bytes)             L4     8.05     7.33     4.96
+style_win_library (512)      L4     2.52     2.33     1.89
+
+What changed (each measured on its own, text L4 / style L4 native unless noted)
+- run() split into run() + runChunk(i0, i1), 16 KB per call, state between calls in the arena and a
+  few globals. Native: no change. wasm fresh process: 15.2 -> 8.8 s / 4.4 -> 2.7 s, i.e. the
+  optimizing tier is now used (within 2% of --no-liftoff). Chunk size 2 KB .. 64 KB: no difference.
+- Table pointers (RECIP, STRETCH) copied to locals; counter / history update passes compute into the
+  local arrays and store in separate loops (as c/fm4.c does), so they vectorize: 3.90 -> 3.65 / no change.
+- Mixer kernels dot16 / upd16 as @[unchecked] functions over fixed blocks of 16 and 8 inputs (count
+  rounded up to 8, padding inputs are 0): 3.65 -> 2.83 / 1.33 -> 1.10. The plain-loop form is kept
+  for wasm32 (blocks are 10% slower there without SIMD), selected by the constant sizeof(*u8).
+- Arena on a 64-byte boundary (one hash bucket = one cache line) and, in the native CLI, on 2 MB
+  huge pages (posix_memalign + madvise, what c/fm4.c big_alloc does): 2.83 -> 2.61 / 1.10 -> 0.97.
+  This was the main reason text was further behind C than images: text uses ~20 tables of 16-32 MB.
+- Hash-table fill in an @[unchecked] helper so that it vectorizes (up to 640 MB at L5):
+  2.61 -> 2.49, text L5 4.31 -> 4.15.
+Tried and not kept
+- @[unchecked] on runChunk: text L1 -4%, L4 -3%, L5 -5.5%, images 0 .. -2% (no longer a regression
+  on images, which came from the mixer loops falling into the scalar remainder at 23 inputs). Not a
+  clear gain, and runChunk decodes untrusted input: checks kept.
+- Splitting the bucket read / stretch loops as well: slower (3.67 -> 3.85).
+- A never-true "nctx > 32 -> return" guard to let LLVM drop index checks: no effect.
+- dot16 with 8 explicit partial sums: scalar code, worse. upd16 without the temporary array (also
+  with @[always_inline]): scalar code, 4.2 s.
+- --clang-flag -msimd128 for wasm: no effect (see Makefile, wasm4simd).

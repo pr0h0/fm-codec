@@ -2,8 +2,9 @@
 # Shared by the native CLI (fm4_cli.bpl) and the WebAssembly build (fm4_wasm.bpl).
 # All working memory comes from reusable global buffers: wasm32 freestanding malloc is a bump
 # allocator whose free() is a no-op, so repeated encode/decode calls must not allocate afresh.
-# Hot-path helpers that contain loops are written inline in run(): BPL adds a stack guard to every
-# function with a loop, which is measurable when called per bit.
+# The model loop is runChunk(); run() calls it for 16 KB of input at a time (see runChunk).
+# Helpers are @[unchecked] leaf functions (no index/null checks, no stack guard); runChunk itself keeps
+# its checks, as it also decodes untrusted input.
 # The OLS predictor is floating point: every expression keeps the exact operation order of
 # ols_pred / ols_upd in c/fm4.c (no fused multiply-add, no reordering); sqrt and floor are the
 # LLVM intrinsics (sqrtsd / f64.sqrt), which are correctly rounded like libm's.
@@ -28,6 +29,7 @@ global G_DEC: bool = false;
 global G_OVF: bool = false;
 
 # reusable buffers
+global AR_RAW: *u8 = nullptr;
 global AR_BASE: *u8 = nullptr;
 global AR_CAP: long = 0;
 global AR_USED: long = 0;
@@ -38,6 +40,29 @@ global DB_CAP: long = 0;
 global IB: *u8 = nullptr;
 global IB_CAP: long = 0;
 global RESULT: *u8 = nullptr;
+
+# model state that lives across runChunk calls (everything else is in the arena or rebuilt per call)
+global S_MPTR: long = 0;
+global S_MLEN: long = 0;
+global S_MPTR2: long = 0;
+global S_MLEN2: long = 0;
+global S_LINESTART: long = 0;
+global S_PREVLINE: long = 0;
+global S_INDENT: long = 0;
+global S_ININD: bool = true;
+global S_IMPTR: long = 0;
+global S_IMLEN: long = 0;
+global S_IMOK: bool = false;
+global S_C4: uint = 0;
+global S_C8: uint = 0;
+global S_W0: uint = 0;
+global S_W1H: uint = 0;
+global S_W2H: uint = 0;
+global S_OLC0: int = 0;
+global S_OLC1: int = 0;
+global S_OLC2: int = 0;
+# bytes per runChunk call
+global CHUNK: long = 16384;
 
 @[unchecked]
 frame ptrAdd(p: *u8, off: long) ret *u8 {
@@ -213,17 +238,6 @@ frame clampW(v: int) ret int {
 }
 
 @[unchecked]
-frame sat16(v: int) ret i16 {
-    if (v > 32767) {
-        return cast<i16>(32767);
-    }
-    if (v < -32768) {
-        return cast<i16>(-32768);
-    }
-    return cast<i16>(v);
-}
-
-@[unchecked]
 frame clamp2047(v: int) ret int {
     if (v > 2047) {
         return 2047;
@@ -341,14 +355,95 @@ frame olsUpd(o: *double, Lm: *double, n: int, cnt: *int, y: double) {
     }
 }
 
+# ---- mixer kernels ----
+# sum of w[k] * st[k] and the weight update, over n inputs (32-bit wrapping sum: order is free).
+# 64-bit targets take fixed blocks of 16 and 8 over n rounded up to 8, which compile to straight
+# vector code with no scalar remainder loop: the inputs past n are 0, so they add nothing and leave
+# their weights unchanged (each weight set has room for 96). wasm32 has no vectors by default and is
+# faster with the plain loop; sizeof(*u8) is a constant, so only one form is compiled in.
+@[unchecked]
+frame dot16(w: *i16, st: *i16, n: int) ret int {
+    local s: int = 0;
+    if (sizeof(*u8) != 8) {
+        loop (local i: int = 0; i < n; i = i + 1) {
+            s = s + cast<int>(w[i]) * cast<int>(st[i]);
+        }
+        return s;
+    }
+    local n8: int = (n + 7) & -8;
+    local k: int = 0;
+    loop (k + 16 <= n8) {
+        loop (local j: int = 0; j < 16; j = j + 1) {
+            s = s + cast<int>(w[k + j]) * cast<int>(st[k + j]);
+        }
+        k = k + 16;
+    }
+    if (k < n8) {
+        loop (local j: int = 0; j < 8; j = j + 1) {
+            s = s + cast<int>(w[k + j]) * cast<int>(st[k + j]);
+        }
+    }
+    return s;
+}
+
+@[unchecked]
+frame updW(w: int, s: int, el: int) ret int {
+    local v: int = w + ((s * el + 131072) >> 18);
+    if (v > 32767) {
+        return 32767;
+    }
+    if (v < -32768) {
+        return -32768;
+    }
+    return v;
+}
+
+# The block form writes its results through t[]: with the store in the same pass the compiler must
+# assume w and st overlap and falls back to scalar code.
+@[unchecked]
+frame upd16(w: *i16, st: *i16, n: int, el: int) {
+    if (sizeof(*u8) != 8) {
+        loop (local i: int = 0; i < n; i = i + 1) {
+            w[i] = cast<i16>(updW(cast<int>(w[i]), cast<int>(st[i]), el));
+        }
+        return;
+    }
+    local n8: int = (n + 7) & -8;
+    local t: int[16];
+    local k: int = 0;
+    loop (k + 16 <= n8) {
+        loop (local j: int = 0; j < 16; j = j + 1) {
+            t[j] = updW(cast<int>(w[k + j]), cast<int>(st[k + j]), el);
+        }
+        loop (local j: int = 0; j < 16; j = j + 1) {
+            w[k + j] = cast<i16>(t[j]);
+        }
+        k = k + 16;
+    }
+    if (k < n8) {
+        loop (local j: int = 0; j < 8; j = j + 1) {
+            t[j] = updW(cast<int>(w[k + j]), cast<int>(st[k + j]), el);
+        }
+        loop (local j: int = 0; j < 8; j = j + 1) {
+            w[k + j] = cast<i16>(t[j]);
+        }
+    }
+}
+
 # ---- arena ----
+# The arena starts on a 64-byte boundary so that a 16-slot hash bucket is exactly one cache line.
+frame arenaAdopt(raw: *u8, n: long) {
+    AR_RAW = raw;
+    AR_BASE = cast<*u8>((cast<long>(raw) + 63) & -64);
+    AR_CAP = n - 64;
+}
+
 frame arenaReset(total: long) {
     if (total > AR_CAP) {
-        if (AR_BASE != nullptr) {
-            free(cast<*void>(AR_BASE));
+        if (AR_RAW != nullptr) {
+            free(cast<*void>(AR_RAW));
         }
-        AR_BASE = cast<*u8>(malloc(total));
-        AR_CAP = total;
+        arenaAdopt(cast<*u8>(malloc(total + 64)), total + 64);
     }
     AR_USED = 0;
 }
@@ -358,6 +453,15 @@ frame arenaTake(n: long) ret *u8 {
     local p: *u8 = ptrAdd(AR_BASE, AR_USED);
     AR_USED = AR_USED + ((n + 63) / 64) * 64;
     return p;
+}
+
+# empty hash tables: slot 0 of each 16-slot bucket is the check word (up to 640 MB to write, so this
+# must vectorize: unchecked)
+@[unchecked]
+frame fillTables(T: *uint, n: long) {
+    loop (local j: long = 0; j < n; j = j + 1) {
+        T[j] = ((j & 15) != 0) ? cast<uint>(16809984) : cast<uint>(0);
+    }
 }
 
 @[unchecked]
@@ -461,8 +565,8 @@ frame arenaSize(mode: int, bb: int, feat: uint, feat2: uint, L: long) ret long {
     loop (local k: int = 0; k < nctx; k = k + 1) {
         total = total + (cast<long>(64) << cast<long>(tableBits(img, feat, bb, k)));
     }
-    # SM, W1, W2, W3, W4, WF, RP, RN
-    total = total + 96 * 256 * 4 + 2048 * 96 * 2 + 768 * 96 * 2 + 2048 * 96 * 2 + 4096 * 96 * 2 + 256 * 4 * 4 + 96 * 64 * 2 + 96 * 64;
+    # SM, W1, W2, W3, W4, WF, RP, RN, saved match predictors (3 * 64 u16 + 3 * 64 u8)
+    total = total + 64 * 6 + 64 * 3 + 96 * 256 * 4 + 2048 * 96 * 2 + 768 * 96 * 2 + 2048 * 96 * 2 + 4096 * 96 * 2 + 256 * 4 * 4 + 96 * 64 * 2 + 96 * 64;
     local napm1: long = img ? 12288 : 65536;
     total = total + napm1 * 33 * 2;
     local fmatch: bool = !img && hasF(feat, cast<uint>(1));
@@ -498,7 +602,14 @@ frame arenaSize(mode: int, bb: int, feat: uint, feat2: uint, L: long) ret long {
 }
 
 # ---- model ----
-frame run(mode: int, bb: int, limit: int, feat: uint, feat2: uint, width: long, data: *u8, L: long) {
+# Codes bytes [i0, i1) of data. The first call (i0 == 0) builds the model in the arena; later calls
+# find the same blocks again (the arena is taken in the same order) and reload the few scalars and
+# small arrays that are kept in locals while the loop runs. The work is split into calls because
+# WebAssembly engines only switch a function to optimized code when it is entered again: one call
+# for the whole input would run in baseline code to the end.
+@[noinline]
+frame runChunk(mode: int, bb: int, limit: int, feat: uint, feat2: uint, width: long, data: *u8, L: long, i0: long, i1: long) {
+    local first: bool = i0 == 0;
     local img: bool = mode == 2;
     local XORD: bool = !img && hasF(feat2, cast<uint>(1));
     local XM4: bool = hasF(feat, cast<uint>(256)) && hasF(feat2, cast<uint>(2));
@@ -551,7 +662,11 @@ frame run(mode: int, bb: int, limit: int, feat: uint, feat2: uint, width: long, 
     local jcol: int = jols + (XOLS ? 2 : 0);
     local jim: int = jcol + (XCOL ? 2 : 0);
 
-    arenaReset(arenaSize(mode, bb, feat, feat2, L));
+    if (first) {
+        arenaReset(arenaSize(mode, bb, feat, feat2, L));
+    } else {
+        AR_USED = 0;
+    }
     local tb: int[96];
     local tOff: long[96];
     local tTotal: long = 0;
@@ -562,109 +677,137 @@ frame run(mode: int, bb: int, limit: int, feat: uint, feat2: uint, width: long, 
     }
     local T: *uint = cast<*uint>(arenaTake(tTotal * 4));
     local Tb: *u8 = cast<*u8>(T);
-    loop (local j: long = 0; j < tTotal; j = j + 1) {
-        T[j] = ((j & 15) != 0) ? cast<uint>(16809984) : cast<uint>(0);
-    }
     local SM: *uint = cast<*uint>(arenaTake(96 * 256 * 4));
-    loop (local j: int = 0; j < 96 * 256; j = j + 1) {
-        SM[j] = cast<uint>(32768);
-    }
-    local winit: i16 = cast<i16>((19661 * 6 / nin) >> 4);
     local W1: *i16 = cast<*i16>(arenaTake(2048 * 96 * 2));
     local W2: *i16 = cast<*i16>(arenaTake(768 * 96 * 2));
     local W3: *i16 = cast<*i16>(arenaTake(2048 * 96 * 2));
     local W4: *i16 = cast<*i16>(arenaTake(4096 * 96 * 2));
     local WF: *int = cast<*int>(arenaTake(256 * 4 * 4));
-    loop (local j: int = 0; j < 2048 * 96; j = j + 1) {
-        W1[j] = winit;
-    }
-    loop (local j: int = 0; j < 768 * 96; j = j + 1) {
-        W2[j] = winit;
-    }
-    loop (local j: int = 0; j < 2048 * 96; j = j + 1) {
-        W3[j] = winit;
-    }
-    loop (local j: int = 0; j < 4096 * 96; j = j + 1) {
-        W4[j] = winit;
-    }
-    loop (local j: int = 0; j < 1024; j = j + 1) {
-        WF[j] = XM4 ? 16384 : 21845;
-    }
-    local apmInit: u16[33];
-    loop (local j: int = 0; j < 33; j = j + 1) {
-        apmInit[j] = cast<u16>(squash((j - 16) * 128) * 16);
-    }
     local napm1: int = img ? 12288 : 65536;
     local A1: *u16 = cast<*u16>(arenaTake(cast<long>(napm1) * 33 * 2));
-    loop (local j: int = 0; j < napm1 * 33; j = j + 1) {
-        A1[j] = apmInit[j % 33];
-    }
     local A2: *u16 = cast<*u16>(nullptr);
     if (fapm2) {
         A2 = cast<*u16>(arenaTake(cast<long>(262144) * 33 * 2));
-        loop (local j: int = 0; j < 262144 * 33; j = j + 1) {
-            A2[j] = apmInit[j % 33];
-        }
     }
     local A3: *u16 = cast<*u16>(nullptr);
     if (fmapm) {
         A3 = cast<*u16>(arenaTake(cast<long>(65536) * 33 * 2));
-        loop (local j: int = 0; j < 65536 * 33; j = j + 1) {
-            A3[j] = apmInit[j % 33];
-        }
     }
     local MT: *uint = cast<*uint>(nullptr);
     local MT2: *uint = cast<*uint>(nullptr);
     if (fmatch) {
         MT = cast<*uint>(arenaTake(4194304 * 4));
-        memset(cast<*void>(MT), 0, 4194304 * 4);
         if (fm2nd) {
             MT2 = cast<*uint>(arenaTake(4194304 * 4));
-            memset(cast<*void>(MT2), 0, 4194304 * 4);
         }
     }
     local IND1: *u16 = cast<*u16>(nullptr);
     local IND2: *u16 = cast<*u16>(nullptr);
     if (find) {
         IND1 = cast<*u16>(arenaTake(256 * 2));
-        memset(cast<*void>(IND1), 0, 256 * 2);
         IND2 = cast<*u16>(arenaTake(4194304 * 2));
-        memset(cast<*void>(IND2), 0, 4194304 * 2);
     }
     local err: *i16 = cast<*i16>(nullptr);
     local perr: *u8 = cast<*u8>(nullptr);
     if (img) {
         err = cast<*i16>(arenaTake((L + 1) * 2));
-        memset(cast<*void>(err), 0, (L + 1) * 2);
         if (np > 0) {
             perr = arenaTake((L + 1) * npl);
-            memset(cast<*void>(perr), 0, (L + 1) * npl);
         }
     }
     local IMT: *uint = cast<*uint>(nullptr);
     if (XIM) {
         IMT = cast<*uint>(arenaTake(4194304 * 4));
-        memset(cast<*void>(IMT), 0, 4194304 * 4);
     }
     local RP: *u16 = cast<*u16>(arenaTake(96 * 64 * 2));
     local RN: *u8 = arenaTake(96 * 64);
-    loop (local j: int = 0; j < 96 * 64; j = j + 1) {
-        RP[j] = cast<u16>(49152);
-        RN[j] = cast<u8>(0);
-    }
     # OLS: 3 channel blocks of 868 doubles, then the Cholesky scratch (784 + 28)
     local OL: *double = cast<*double>(nullptr);
     local OLm: *double = cast<*double>(nullptr);
     local oln: int[3] = [10, 14, 15];
-    local olc: int[3] = [0, 0, 0];
+    local olc: int[3] = [S_OLC0, S_OLC1, S_OLC2];
     if (XOLS) {
         OL = cast<*double>(arenaTake((3 * 868 + 812) * 8));
-        memset(cast<*void>(OL), 0, (3 * 868 + 812) * 8);
         OLm = cast<*double>(ptrAdd(cast<*u8>(OL), 3 * 868 * 8));
         if (XWIDE) {
             oln[0] = 20;
             oln[1] = 24;
             oln[2] = 25;
+        }
+    }
+    # match predictors between calls: MP, MP2, IMP then MN, MN2, IMN
+    local SVP: *u16 = cast<*u16>(arenaTake(64 * 6));
+    local SVN: *u8 = arenaTake(64 * 3);
+    if (first) {
+        fillTables(T, tTotal);
+        loop (local j: int = 0; j < 96 * 256; j = j + 1) {
+            SM[j] = cast<uint>(32768);
+        }
+        local winit: i16 = cast<i16>((19661 * 6 / nin) >> 4);
+        loop (local j: int = 0; j < 2048 * 96; j = j + 1) {
+            W1[j] = winit;
+        }
+        loop (local j: int = 0; j < 768 * 96; j = j + 1) {
+            W2[j] = winit;
+        }
+        loop (local j: int = 0; j < 2048 * 96; j = j + 1) {
+            W3[j] = winit;
+        }
+        loop (local j: int = 0; j < 4096 * 96; j = j + 1) {
+            W4[j] = winit;
+        }
+        loop (local j: int = 0; j < 1024; j = j + 1) {
+            WF[j] = XM4 ? 16384 : 21845;
+        }
+        local apmInit: u16[33];
+        loop (local j: int = 0; j < 33; j = j + 1) {
+            apmInit[j] = cast<u16>(squash((j - 16) * 128) * 16);
+        }
+        loop (local j: int = 0; j < napm1 * 33; j = j + 1) {
+            A1[j] = apmInit[j % 33];
+        }
+        if (fapm2) {
+            loop (local j: int = 0; j < 262144 * 33; j = j + 1) {
+                A2[j] = apmInit[j % 33];
+            }
+        }
+        if (fmapm) {
+            loop (local j: int = 0; j < 65536 * 33; j = j + 1) {
+                A3[j] = apmInit[j % 33];
+            }
+        }
+        if (fmatch) {
+            memset(cast<*void>(MT), 0, 4194304 * 4);
+            if (fm2nd) {
+                memset(cast<*void>(MT2), 0, 4194304 * 4);
+            }
+        }
+        if (find) {
+            memset(cast<*void>(IND1), 0, 256 * 2);
+            memset(cast<*void>(IND2), 0, 4194304 * 2);
+        }
+        if (img) {
+            memset(cast<*void>(err), 0, (L + 1) * 2);
+            if (np > 0) {
+                memset(cast<*void>(perr), 0, (L + 1) * npl);
+            }
+        }
+        if (XIM) {
+            memset(cast<*void>(IMT), 0, 4194304 * 4);
+        }
+        loop (local j: int = 0; j < 96 * 64; j = j + 1) {
+            RP[j] = cast<u16>(49152);
+            RN[j] = cast<u8>(0);
+        }
+        if (XOLS) {
+            memset(cast<*void>(OL), 0, (3 * 868 + 812) * 8);
+        }
+        olc[0] = 0;
+        olc[1] = 0;
+        olc[2] = 0;
+        loop (local j: int = 0; j < 64 * 3; j = j + 1) {
+            SVP[j] = cast<u16>(49152);
+            SVN[j] = cast<u8>(0);
         }
     }
     local oin: bool = false;
@@ -676,12 +819,12 @@ frame run(mode: int, bb: int, limit: int, feat: uint, feat2: uint, width: long, 
     local MN2: u8[64];
     local IMN: u8[64];
     loop (local j: int = 0; j < 64; j = j + 1) {
-        MP[j] = cast<u16>(49152);
-        MP2[j] = cast<u16>(49152);
-        IMP[j] = cast<u16>(49152);
-        MN[j] = cast<u8>(0);
-        MN2[j] = cast<u8>(0);
-        IMN[j] = cast<u8>(0);
+        MP[j] = SVP[j];
+        MP2[j] = SVP[64 + j];
+        IMP[j] = SVP[128 + j];
+        MN[j] = SVN[j];
+        MN2[j] = SVN[64 + j];
+        IMN[j] = SVN[128 + j];
     }
     local ctx: uint[96];
     local bko: long[96];
@@ -711,6 +854,8 @@ frame run(mode: int, bb: int, limit: int, feat: uint, feat2: uint, width: long, 
     loop (local j: int = 0; j < 196; j = j + 1) {
         st[j] = cast<i16>(0);
     }
+    # entries past nin stay 0 (dot16 relies on it)
+    local stp: *i16 = &st[0];
     local pr: int[12] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
     local dd: int[4] = [0, 0, 0, 0];
     local stride: long = 3 * width;
@@ -725,17 +870,39 @@ frame run(mode: int, bb: int, limit: int, feat: uint, feat2: uint, width: long, 
     local imptr: long = 0;
     local imlen: long = 0;
     local imok: bool = false;
-    local imev: int = -1;
-    local hord: int = 0;
-    local isym: int = -1;
-    local iq: int = 0;
     local c4: uint = 0;
     local c8: uint = 0;
     local w0: uint = 0;
     local w1h: uint = 0;
     local w2h: uint = 0;
+    if (!first) {
+        mptr = S_MPTR;
+        mlen = S_MLEN;
+        mptr2 = S_MPTR2;
+        mlen2 = S_MLEN2;
+        linestart = S_LINESTART;
+        prevline = S_PREVLINE;
+        indent = S_INDENT;
+        inind = S_ININD;
+        imptr = S_IMPTR;
+        imlen = S_IMLEN;
+        imok = S_IMOK;
+        c4 = S_C4;
+        c8 = S_C8;
+        w0 = S_W0;
+        w1h = S_W1H;
+        w2h = S_W2H;
+    }
+    # set again for every byte that uses them
+    local imev: int = -1;
+    local hord: int = 0;
+    local isym: int = -1;
+    local iq: int = 0;
     local z: uint = 0;
     local lr: int = LR;
+    # table pointers in locals: a global would be reloaded (and null-checked) after every store
+    local recip: *int = RECIP;
+    local stretch: *int = STRETCH;
     # coder state in locals (inlined coder)
     local x1: uint = G_X1;
     local x2: uint = G_X2;
@@ -747,7 +914,7 @@ frame run(mode: int, bb: int, limit: int, feat: uint, feat2: uint, width: long, 
     local gcap: long = G_CAP;
     local ovf: bool = G_OVF;
 
-    loop (local i: long = 0; i < L; i = i + 1) {
+    loop (local i: long = i0; i < i1; i = i + 1) {
         local ch: int = 0;
         local act: int = 0;
         local eP: int = 0;
@@ -1213,14 +1380,14 @@ frame run(mode: int, bb: int, limit: int, feat: uint, feat2: uint, width: long, 
             local n: int = 0;
             loop (local k: int = 0; k < nctx; k = k + 1) {
                 ev[k] = T[bko[k] + node];
-                st[n] = cast<i16>(STRETCH[cast<int>((ev[k] & cast<uint>(0xFFFF)) >> 4)]);
+                st[n] = cast<i16>(stretch[cast<int>((ev[k] & cast<uint>(0xFFFF)) >> 4)]);
                 n = n + 1;
             }
             if (fhist) {
                 loop (local k: int = 0; k < nctx; k = k + 1) {
                     smi[k] = k * 256 + cast<int>(ev[k] >> 24);
                     sv[k] = SM[smi[k]];
-                    st[n] = cast<i16>(STRETCH[cast<int>((sv[k] & cast<uint>(0xFFFF)) >> 4)]);
+                    st[n] = cast<i16>(stretch[cast<int>((sv[k] & cast<uint>(0xFFFF)) >> 4)]);
                     n = n + 1;
                 }
             }
@@ -1231,7 +1398,7 @@ frame run(mode: int, bb: int, limit: int, feat: uint, feat2: uint, width: long, 
             loop (local k: int = 0; k < nrun; k = k + 1) {
                 if (!rmiss[k]) {
                     reb[k] = (rb[k] >> (7 - bp)) & 1;
-                    local spr: int = STRETCH[cast<int>(RP[k * 64 + rq[k] * 2 + b0f]) >> 4];
+                    local spr: int = stretch[cast<int>(RP[k * 64 + rq[k] * 2 + b0f]) >> 4];
                     st[n] = cast<i16>((reb[k] != 0) ? spr : -spr);
                 } else {
                     reb[k] = -1;
@@ -1244,7 +1411,7 @@ frame run(mode: int, bb: int, limit: int, feat: uint, feat2: uint, width: long, 
                 if (isym >= 0 && !imiss) {
                     ieb = (isym >> (7 - bp)) & 1;
                     iqq = iq * 2 + b0f;
-                    local spi: int = STRETCH[cast<int>(IMP[iqq]) >> 4];
+                    local spi: int = stretch[cast<int>(IMP[iqq]) >> 4];
                     st[n] = cast<i16>((ieb != 0) ? spi : -spi);
                 } else {
                     st[n] = cast<i16>(0);
@@ -1255,7 +1422,7 @@ frame run(mode: int, bb: int, limit: int, feat: uint, feat2: uint, width: long, 
                 if (mb >= 0 && !mmiss) {
                     eb = (mb >> (7 - bp)) & 1;
                     mq = lenq * 2 + b0f;
-                    local sp: int = STRETCH[cast<int>(MP[mq]) >> 4];
+                    local sp: int = stretch[cast<int>(MP[mq]) >> 4];
                     st[n] = cast<i16>((eb != 0) ? sp : -sp);
                 } else {
                     st[n] = cast<i16>(0);
@@ -1266,7 +1433,7 @@ frame run(mode: int, bb: int, limit: int, feat: uint, feat2: uint, width: long, 
                 if (mb2 >= 0 && !mmiss2) {
                     eb2 = (mb2 >> (7 - bp)) & 1;
                     mq2 = lenq2 * 2 + b0f;
-                    local sp2: int = STRETCH[cast<int>(MP2[mq2]) >> 4];
+                    local sp2: int = stretch[cast<int>(MP2[mq2]) >> 4];
                     st[n] = cast<i16>((eb2 != 0) ? sp2 : -sp2);
                 } else {
                     st[n] = cast<i16>(0);
@@ -1305,10 +1472,7 @@ frame run(mode: int, bb: int, limit: int, feat: uint, feat2: uint, width: long, 
             }
             local wfo: int = cast<int>(c0) * 4;
             # mixers: int16 weights and inputs, wrapping 32-bit sum, arithmetic >> 12
-            local s1: int = 0;
-            loop (local k: int = 0; k < nin; k = k + 1) {
-                s1 = s1 + cast<int>(W1[w1o + k]) * cast<int>(st[k]);
-            }
+            local s1: int = dot16(&W1[w1o], stp, nin);
             local d: int = s1 >> 12;
             local p1: int = clampp(squash(d));
             local p2: int = 0;
@@ -1317,24 +1481,15 @@ frame run(mode: int, bb: int, limit: int, feat: uint, feat2: uint, width: long, 
             local pf: int = 0;
             local d2: int = 0;
             if (fmix2) {
-                local s2m: int = 0;
-                loop (local k: int = 0; k < nin; k = k + 1) {
-                    s2m = s2m + cast<int>(W2[w2o + k]) * cast<int>(st[k]);
-                }
+                local s2m: int = dot16(&W2[w2o], stp, nin);
                 d2 = s2m >> 12;
                 p2 = clampp(squash(d2));
                 d = (d + d2) >> 1;
             }
             if (fmix3) {
-                local s3: int = 0;
-                loop (local k: int = 0; k < nin; k = k + 1) {
-                    s3 = s3 + cast<int>(W3[w3o + k]) * cast<int>(st[k]);
-                }
+                local s3: int = dot16(&W3[w3o], stp, nin);
                 if (XM4) {
-                    local s4: int = 0;
-                    loop (local k: int = 0; k < nin; k = k + 1) {
-                        s4 = s4 + cast<int>(W4[w4o + k]) * cast<int>(st[k]);
-                    }
+                    local s4: int = dot16(&W4[w4o], stp, nin);
                     dd[3] = clamp2047(s4 >> 12);
                     p4 = clampp(squash(dd[3]));
                 }
@@ -1418,24 +1573,16 @@ frame run(mode: int, bb: int, limit: int, feat: uint, feat2: uint, width: long, 
             }
             # ---- updates ----
             local el1: int = ((bit << 12) - p1) * lr;
-            loop (local k: int = 0; k < nin; k = k + 1) {
-                W1[w1o + k] = sat16(cast<int>(W1[w1o + k]) + ((cast<int>(st[k]) * el1 + 131072) >> 18));
-            }
+            upd16(&W1[w1o], stp, nin, el1);
             if (fmix2) {
                 local el2: int = ((bit << 12) - p2) * lr;
-                loop (local k: int = 0; k < nin; k = k + 1) {
-                    W2[w2o + k] = sat16(cast<int>(W2[w2o + k]) + ((cast<int>(st[k]) * el2 + 131072) >> 18));
-                }
+                upd16(&W2[w2o], stp, nin, el2);
                 if (fmix3) {
                     local el3: int = ((bit << 12) - p3) * lr;
-                    loop (local k: int = 0; k < nin; k = k + 1) {
-                        W3[w3o + k] = sat16(cast<int>(W3[w3o + k]) + ((cast<int>(st[k]) * el3 + 131072) >> 18));
-                    }
+                    upd16(&W3[w3o], stp, nin, el3);
                     if (XM4) {
                         local el4: int = ((bit << 12) - p4) * lr;
-                        loop (local k: int = 0; k < nin; k = k + 1) {
-                            W4[w4o + k] = sat16(cast<int>(W4[w4o + k]) + ((cast<int>(st[k]) * el4 + 131072) >> 18));
-                        }
+                        upd16(&W4[w4o], stp, nin, el4);
                     }
                     local elf: int = ((bit << 12) - pf) * lr;
                     loop (local k: int = 0; k < nm; k = k + 1) {
@@ -1462,7 +1609,7 @@ frame run(mode: int, bb: int, limit: int, feat: uint, feat2: uint, width: long, 
                 local p: int = cast<int>(e & cast<uint>(0xFFFF));
                 local cnt: int = cast<int>((e >> 16) & cast<uint>(255));
                 local hb: uint = e >> 24;
-                local np2: int = p + ((((bit << 16) - p) * RECIP[cnt]) >> 15);
+                local np2: int = p + ((((bit << 16) - p) * recip[cnt]) >> 15);
                 if (cnt < limit) {
                     cnt = cnt + 1;
                 }
@@ -1470,18 +1617,25 @@ frame run(mode: int, bb: int, limit: int, feat: uint, feat2: uint, width: long, 
                 if (hb >= cast<uint>(256)) {
                     hb = (hb & cast<uint>(0x7F)) | cast<uint>(0x80);
                 }
-                T[bko[k] + node] = cast<uint>(np2) | (cast<uint>(cnt) << 16) | (hb << 24);
+                ev[k] = cast<uint>(np2) | (cast<uint>(cnt) << 16) | (hb << 24);
             }
             if (fhist) {
                 loop (local k: int = 0; k < nctx; k = k + 1) {
                     local spv: int = cast<int>(sv[k] & cast<uint>(0xFFFF));
                     local sn: int = cast<int>(sv[k] >> 16);
-                    spv = spv + ((((bit << 16) - spv) * RECIP[sn]) >> 15);
+                    spv = spv + ((((bit << 16) - spv) * recip[sn]) >> 15);
                     if (sn < 255) {
                         sn = sn + 1;
                     }
-                    SM[smi[k]] = cast<uint>(spv) | (cast<uint>(sn) << 16);
+                    sv[k] = cast<uint>(spv) | (cast<uint>(sn) << 16);
                 }
+                loop (local k: int = 0; k < nctx; k = k + 1) {
+                    SM[smi[k]] = sv[k];
+                }
+            }
+            # stores kept out of the arithmetic passes above so that those vectorize
+            loop (local k: int = 0; k < nctx; k = k + 1) {
+                T[bko[k] + node] = ev[k];
             }
             loop (local k: int = 0; k < nrun; k = k + 1) {
                 if (reb[k] >= 0) {
@@ -1489,7 +1643,7 @@ frame run(mode: int, bb: int, limit: int, feat: uint, feat2: uint, width: long, 
                     local jr: int = k * 64 + rq[k] * 2 + b0f;
                     local rcn: int = cast<int>(RN[jr]);
                     local rpv: int = cast<int>(RP[jr]);
-                    RP[jr] = cast<u16>((rpv + ((((okr << 16) - rpv) * RECIP[rcn]) >> 15)) & 65535);
+                    RP[jr] = cast<u16>((rpv + ((((okr << 16) - rpv) * recip[rcn]) >> 15)) & 65535);
                     if (rcn < 255) {
                         RN[jr] = cast<u8>(rcn + 1);
                     }
@@ -1502,7 +1656,7 @@ frame run(mode: int, bb: int, limit: int, feat: uint, feat2: uint, width: long, 
                 local oki: int = (bit == ieb) ? 1 : 0;
                 local icn: int = cast<int>(IMN[iqq]);
                 local ipv: int = cast<int>(IMP[iqq]);
-                IMP[iqq] = cast<u16>((ipv + ((((oki << 16) - ipv) * RECIP[icn]) >> 15)) & 65535);
+                IMP[iqq] = cast<u16>((ipv + ((((oki << 16) - ipv) * recip[icn]) >> 15)) & 65535);
                 if (icn < 255) {
                     IMN[iqq] = cast<u8>(icn + 1);
                 }
@@ -1514,7 +1668,7 @@ frame run(mode: int, bb: int, limit: int, feat: uint, feat2: uint, width: long, 
                 local ok: int = (bit == eb) ? 1 : 0;
                 local mc: int = cast<int>(MN[mq]);
                 local mpv: int = cast<int>(MP[mq]);
-                MP[mq] = cast<u16>((mpv + ((((ok << 16) - mpv) * RECIP[mc]) >> 15)) & 65535);
+                MP[mq] = cast<u16>((mpv + ((((ok << 16) - mpv) * recip[mc]) >> 15)) & 65535);
                 if (mc < 255) {
                     MN[mq] = cast<u8>(mc + 1);
                 }
@@ -1526,7 +1680,7 @@ frame run(mode: int, bb: int, limit: int, feat: uint, feat2: uint, width: long, 
                 local ok2: int = (bit == eb2) ? 1 : 0;
                 local mc2: int = cast<int>(MN2[mq2]);
                 local mpv2: int = cast<int>(MP2[mq2]);
-                MP2[mq2] = cast<u16>((mpv2 + ((((ok2 << 16) - mpv2) * RECIP[mc2]) >> 15)) & 65535);
+                MP2[mq2] = cast<u16>((mpv2 + ((((ok2 << 16) - mpv2) * recip[mc2]) >> 15)) & 65535);
                 if (mc2 < 255) {
                     MN2[mq2] = cast<u8>(mc2 + 1);
                 }
@@ -1617,6 +1771,45 @@ frame run(mode: int, bb: int, limit: int, feat: uint, feat2: uint, width: long, 
     G_LEN = glen;
     G_POS = gpos;
     G_OVF = ovf;
+    S_MPTR = mptr;
+    S_MLEN = mlen;
+    S_MPTR2 = mptr2;
+    S_MLEN2 = mlen2;
+    S_LINESTART = linestart;
+    S_PREVLINE = prevline;
+    S_INDENT = indent;
+    S_ININD = inind;
+    S_IMPTR = imptr;
+    S_IMLEN = imlen;
+    S_IMOK = imok;
+    S_C4 = c4;
+    S_C8 = c8;
+    S_W0 = w0;
+    S_W1H = w1h;
+    S_W2H = w2h;
+    S_OLC0 = olc[0];
+    S_OLC1 = olc[1];
+    S_OLC2 = olc[2];
+    loop (local j: int = 0; j < 64; j = j + 1) {
+        SVP[j] = MP[j];
+        SVP[64 + j] = MP2[j];
+        SVP[128 + j] = IMP[j];
+        SVN[j] = MN[j];
+        SVN[64 + j] = MN2[j];
+        SVN[128 + j] = IMN[j];
+    }
+}
+
+frame run(mode: int, bb: int, limit: int, feat: uint, feat2: uint, width: long, data: *u8, L: long) {
+    local i0: long = 0;
+    loop (i0 < L || i0 == 0) {
+        local i1: long = i0 + CHUNK;
+        if (i1 > L) {
+            i1 = L;
+        }
+        runChunk(mode, bb, limit, feat, feat2, width, data, L, i0, i1);
+        i0 = i0 + CHUNK;
+    }
 }
 
 # ---- E8/E9 x86 transform ----
@@ -1839,6 +2032,16 @@ frame fm4Decode(f: *u8, n: long) ret long {
     return L;
 }
 
+# Optional: give the codec its working memory (n bytes at p, allocated with malloc or compatible; the
+# codec frees it if it ever needs more). The native CLI passes huge-page memory here.
+@[c_export]
+frame fm4SetArena(p: *u8, n: long) {
+    if (AR_RAW != nullptr) {
+        free(cast<*void>(AR_RAW));
+    }
+    arenaAdopt(p, n);
+}
+
 @[c_export]
 frame fm4Result() ret *u8 {
     return RESULT;
@@ -1864,7 +2067,7 @@ frame fm4Estimate(L: long, mode: int) ret long {
     local total: long = 1048576 + 4096 * 4 + 256 * 4 + 33 * 4;
     local ar: long = arenaSize(mode, bb, levelFeat(5, mode), levelFeat2(5, mode), L);
     if (ar > AR_CAP) {
-        total = total + ar;
+        total = total + ar + 64;
     }
     local need: long = L + HDR + 64;
     if (need > OB_CAP) {
@@ -1884,3 +2087,4 @@ export fm4Decode;
 export fm4Result;
 export fm4InputBuffer;
 export fm4Estimate;
+export fm4SetArena;

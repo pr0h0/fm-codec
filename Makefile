@@ -40,5 +40,11 @@ bpl/fm4: bpl/fm4_core.bpl bpl/fm4_cli.bpl
 wasm4: bpl/fm4.wasm
 bpl/fm4.wasm: bpl/fm4_core.bpl bpl/fm4_wasm.bpl
 	cd bpl && BPL_REQUIRE_WASM_LD=1 $(BPL) build fm4_wasm.bpl --target wasm32-unknown-unknown -O 3 -o fm4.wasm
+# Optional SIMD build (about 1.4x faster). --cpu bleeding-edge is the only way to get simd128 past the
+# per-function target features BPL emits; it also turns on tail calls, bulk memory and saturating
+# conversions, so it needs Chrome 112+, Firefox 121+ or Safari 18.2+. Same exports, same host file.
+wasm4simd: bpl/fm4.simd.wasm
+bpl/fm4.simd.wasm: bpl/fm4_core.bpl bpl/fm4_wasm.bpl
+	cd bpl && BPL_REQUIRE_WASM_LD=1 $(BPL) build fm4_wasm.bpl --target wasm32-unknown-unknown --cpu bleeding-edge -O 3 -o fm4.simd.wasm
 
-.PHONY: bpl3 wasm3 bpl4 wasm4 all c bpl wasm testdata clean
+.PHONY: bpl3 wasm3 bpl4 wasm4 wasm4simd all c bpl wasm testdata clean

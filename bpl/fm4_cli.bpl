@@ -1,6 +1,6 @@
 # fm4 native CLI (BPL):  fm4 enc LEVEL bytes IN OUT | fm4 enc LEVEL image WIDTH IN OUT | fm4 dec IN OUT
 import printf, malloc, strcmp, atoi from "std/c.bpl";
-import fm4Encode, fm4Decode, fm4Result from "./fm4_core.bpl";
+import fm4Encode, fm4Decode, fm4Result, fm4Estimate, fm4SetArena from "./fm4_core.bpl";
 
 extern fopen(path: string, mode: string) ret *void;
 extern fread(buffer: *void, size: long, count: long, stream: *void) ret long;
@@ -8,6 +8,19 @@ extern fwrite(buffer: *void, size: long, count: long, stream: *void) ret long;
 extern fclose(stream: *void) ret int;
 extern fseek(stream: *void, offset: long, whence: int) ret int;
 extern ftell(stream: *void) ret long;
+extern posix_memalign(out: **void, align: long, size: long) ret int;
+extern madvise(p: *void, n: long, advice: int) ret int;
+
+# Working memory for L input bytes on 2 MB huge pages where the system gives them (fewer TLB misses
+# in the big hash tables; no effect on the output). On failure the codec allocates for itself.
+frame hugeArena(L: long, mode: int) {
+    local n: long = fm4Estimate(L, mode);
+    local p: *void = nullptr;
+    if (posix_memalign(&p, 2097152, n) == 0) {
+        madvise(p, n, 14);
+        fm4SetArena(cast<*u8>(p), n);
+    }
+}
 
 frame slurp(path: string, outLen: *long) ret *u8 {
     local f: *void = fopen(path, "rb");
@@ -63,6 +76,7 @@ frame main(argc: int, argv: *string) ret int {
             printf("bad width\n");
             return 1;
         }
+        hugeArena(L, mode);
         local n: long = fm4Encode(level, mode, width, data, L);
         return spit(argv[ia + 1], fm4Result(), n);
     }
@@ -71,6 +85,11 @@ frame main(argc: int, argv: *string) ret int {
         local f: *u8 = slurp(argv[2], &n);
         if (f == nullptr) {
             return 1;
+        }
+        if (n >= 28) {
+            # original length (low 32 bits) and mode from the header
+            local hl: long = cast<long>(f[16]) | (cast<long>(f[17]) << 8) | (cast<long>(f[18]) << 16) | (cast<long>(f[19]) << 24);
+            hugeArena(hl, (f[4] == cast<u8>(2)) ? 2 : 1);
         }
         local L: long = fm4Decode(f, n);
         if (L < 0) {
