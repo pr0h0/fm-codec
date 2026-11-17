@@ -4,7 +4,7 @@ BPL ?= bpl
 CC ?= gcc
 CFLAGS ?= -O3 -march=native -Wall
 
-all: c bpl wasm bpl3 wasm3
+all: c bpl wasm bpl3 wasm3 bpl4 wasm4
 
 c: c/fm4 c/fm3 c/fm2 c/fm c/fmx
 c/fm4: c/fm4.c ; $(CC) $(CFLAGS) -ffp-contract=off -o $@ $< -lm
@@ -25,7 +25,7 @@ testdata:
 	tools/make_testdata.sh
 
 clean:
-	rm -f c/fm c/fm2 c/fm3 c/fmx bpl/fm bpl/fm2 bpl/fm3 bpl/*.wasm bpl/*.ll
+	rm -f c/fm c/fm2 c/fm3 c/fmx bpl/fm bpl/fm2 bpl/fm3 bpl/fm4 bpl/*.wasm bpl/*.ll
 
 bpl3: bpl/fm3
 bpl/fm3: bpl/fm3_core.bpl bpl/fm3_cli.bpl
@@ -34,4 +34,11 @@ wasm3: bpl/fm3.wasm
 bpl/fm3.wasm: bpl/fm3_core.bpl bpl/fm3_wasm.bpl
 	cd bpl && BPL_REQUIRE_WASM_LD=1 $(BPL) build fm3_wasm.bpl --target wasm32-unknown-unknown -O 3 -o fm3.wasm
 
-.PHONY: bpl3 wasm3 all c bpl wasm testdata clean
+bpl4: bpl/fm4
+bpl/fm4: bpl/fm4_core.bpl bpl/fm4_cli.bpl
+	cd bpl && $(BPL) build fm4_cli.bpl -O 3 --march native -o fm4
+wasm4: bpl/fm4.wasm
+bpl/fm4.wasm: bpl/fm4_core.bpl bpl/fm4_wasm.bpl
+	cd bpl && BPL_REQUIRE_WASM_LD=1 $(BPL) build fm4_wasm.bpl --target wasm32-unknown-unknown -O 3 -o fm4.wasm
+
+.PHONY: bpl3 wasm3 bpl4 wasm4 all c bpl wasm testdata clean

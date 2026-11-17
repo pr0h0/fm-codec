@@ -402,7 +402,7 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, uint32_t f
             {
                 int j = 12 + (fimgx ? 4 : 0) + (XOLS ? 2 : 0);
                 if (XCOL) ctx[j++] = H(28, chv, (uint32_t)(Wv | Nv << 8 | NWv << 16), (uint32_t)NEv);
-                if (XCOL) ctx[j++] = H(29, chv, (uint32_t)((ch ? data[i - 1] : 0) | (ch == 2 ? data[i - 2] : 0) << 8 | Wv << 16), (uint32_t)(ch ? data[iW - 1] - data[i - 1] + 256 : 0) * 256 + (uint32_t)Nv);
+                if (XCOL) ctx[j++] = H(29, chv, (uint32_t)((ch ? data[i - 1] : 0) | (ch == 2 ? data[i - 2] : 0) << 8 | Wv << 16), (uint32_t)(ch ? (i > 3 ? data[iW - 1] : 0) - data[i - 1] + 256 : 0) * 256 + (uint32_t)Nv);
                 if (XIM) {   /* 2-D match: pixel seen after the same 4 neighbour pixels */
                     if (ch == 0) {
                         if (imlen > 0 && imok) { imptr++; if (imlen < 65535) imlen++; } else imlen = 0;
