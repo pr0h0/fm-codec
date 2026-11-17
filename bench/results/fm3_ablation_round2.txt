@@ -1,0 +1,7 @@
+FEAT=63           text=0.1390(14.3s)  prose=0.1726(5.3s)  bin=0.2920(21.4s)
+FEAT=63 E8=1      text=0.1390(14.7s)  prose=0.1726(5.4s)  bin=0.2920(21.1s)
+FEAT=191          text=0.1388(16.6s)  prose=0.1725(6.0s)  bin=0.2843(24.7s)
+FEAT=319          text=0.1369(18.2s)  prose=0.1715(6.6s)  bin=0.2880(25.1s)
+FEAT=447          text=0.1363(20.5s)  prose=0.1710(7.7s)  bin=0.2793(29.2s)
+FEAT=447 LR=12    text=0.1357(20.9s)  prose=0.1699(7.5s)  bin=0.2791(28.7s)
+FEAT=447 LR=30    text=0.1379(20.6s)  prose=0.1732(7.4s)  bin=0.2807(28.9s)

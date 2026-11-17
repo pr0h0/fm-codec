@@ -12,13 +12,13 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define MAXIN 16
+#define MAXIN 20
 #define NPRED 9
 #define HDR 28
 
 static int SQ_T[33] = {1, 2, 3, 6, 10, 16, 27, 45, 73, 120, 194, 310, 488, 747, 1101, 1546, 2047,
                        2549, 2994, 3348, 3607, 3785, 3901, 3975, 4022, 4050, 4068, 4079, 4085, 4089, 4092, 4093, 4094};
-static int STRETCH[4096], RECIP[256];
+static int STRETCH[4096], RECIP[256], LR = 20;
 static int squash(int d) {
     if (d > 2047) return 4095;
     if (d < -2047) return 1;
@@ -85,7 +85,7 @@ static inline int code_bit(Coder *c, int p12, int bit) {
 }
 static inline void upd_w(int32_t *w, const int *st, int n, int e) {
     for (int k = 0; k < n; k++) {
-        int32_t nw = w[k] + ((st[k] * e * 20) >> 14);
+        int32_t nw = w[k] + ((st[k] * e * LR) >> 14);
         w[k] = nw > (1 << 22) ? (1 << 22) : (nw < -(1 << 22) ? -(1 << 22) : nw);
     }
 }
@@ -106,7 +106,10 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, int64_t wi
     int img = mode == 2;
     int fmatch = !img && (feat & 1), fword = !img && (feat & 2), fmsel = !img && (feat & 4);
     int fapm2 = !img && (feat & 8), fhi = !img && (feat & 16), fmix2 = (feat & 32) != 0;
-    int nctx = img ? 12 : 6 + (fword ? 2 : 0) + (fhi ? 2 : 0);
+    int fsparse = !img && (feat & 128), fmix3 = fmix2 && (feat & 256);
+    int fimgx = img && (feat & 512), fbias = img && (feat & 1024);
+    int32_t BS[2187 * 2] = {0};   /* per gradient-context error sum / count (bias cancellation) */
+    int nctx = img ? 12 + (fimgx ? 4 : 0) : 6 + (fword ? 2 : 0) + (fhi ? 2 : 0) + (fsparse ? 3 : 0);
     int nin = nctx + (fmatch ? 1 : 0) + 1;       /* + match input + bias input */
     int np = img ? 9 : 0;
     size_t tsz = (size_t)16 << bb;
@@ -120,6 +123,9 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, int64_t wi
     int32_t *W1 = malloc(sizeof(int32_t) * nsets1 * MAXIN), *W2 = malloc(sizeof(int32_t) * nsets2 * MAXIN);
     for (int j = 0; j < nsets1 * MAXIN; j++) W1[j] = winit;
     for (int j = 0; j < nsets2 * MAXIN; j++) W2[j] = winit;
+    int32_t *W3 = malloc(sizeof(int32_t) * 2048 * MAXIN), *WF = malloc(sizeof(int32_t) * 256 * 3);
+    for (int j = 0; j < 2048 * MAXIN; j++) W3[j] = winit;
+    for (int j = 0; j < 256 * 3; j++) WF[j] = 21845;
     int napm1 = img ? 256 * 16 * 3 : 65536, napm2 = 1 << 18;
     uint16_t *A1 = malloc(sizeof(uint16_t) * napm1 * 33), *A2 = malloc(sizeof(uint16_t) * (fapm2 ? napm2 : 1) * 33);
     for (int k = 0; k < napm1; k++) for (int j = 0; j < 33; j++) A1[k * 33 + j] = squash((j - 16) * 128) * 16;
@@ -137,7 +143,7 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, int64_t wi
     static const int ORD[8] = {0, 1, 2, 3, 4, 6, 5, 7};
 
     for (int64_t i = 0; i < L; i++) {
-        int ch = 0, act = 0, eP = 0, pred = 0, sym = 0, pr[NPRED];
+        int ch = 0, act = 0, eP = 0, pred = 0, sym = 0, pr[NPRED], bctx = 0, predRaw = 0;
         int mb = -1, lenq = 0, msel = 0;
         if (!img) {
             for (int k = 0; k < 6 + (fhi ? 2 : 0); k++) {
@@ -147,6 +153,12 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, int64_t wi
                 ctx[k] = H(o, c4 & m, hi, 0);
             }
             if (fword) { int b = 6 + (fhi ? 2 : 0); ctx[b] = H(30, w0, 0, 0); ctx[b + 1] = H(31, w0, w1, 0); }
+            if (fsparse) {
+                int b = 6 + (fhi ? 2 : 0) + (fword ? 2 : 0);
+                ctx[b] = H(40, (c4 >> 8) & 0xFF, 0, 0);          /* byte i-2 alone */
+                ctx[b + 1] = H(41, (c4 >> 16) & 0xFFFF, 0, 0);   /* bytes i-3,i-4 */
+                ctx[b + 2] = H(42, (uint32_t)(i & 3), c4 & 0xFF, 0); /* 4-byte alignment + last byte */
+            }
             if (fmatch) {
                 if (mlen > 0) { if (data[mptr] == data[i - 1]) { mlen++; mptr++; } else mlen = 0; }
                 if (i >= 6) {
@@ -206,6 +218,13 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, int64_t wi
                 num += w * pr[k]; den += w;
             }
             pred = (int)((num + den / 2) / den);
+            if (fbias) {
+                bctx = (((int)qg(Wv - NWv) - 4) * 9 + ((int)qg(Nv - NWv) - 4)) * 9 + ((int)qg(NEv - Nv) - 4);
+                bctx = bctx * 3 + ch;
+                predRaw = pred;
+                int sum = BS[bctx * 2], cnt = BS[bctx * 2 + 1];
+                if (cnt > 0) pred = clamp255(pred + (sum >= 0 ? (sum + cnt / 2) / cnt : -((-sum + cnt / 2) / cnt)));
+            }
             int eW = hasW ? err[iW] : 0, eN = hasN ? err[iN] : 0, eNW = (hasN && hasW) ? err[iNW] : 0;
             int eNE = hasNE ? err[iNE] : 0, eP2 = ch == 2 ? err[i - 2] : 0;
             eP = ch ? err[i - 1] : 0;
@@ -224,6 +243,13 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, int64_t wi
             ctx[9] = H(19, chv, qe(pr[0] - pred, 24) * 256 + qe(pr[4] - pred, 24), 0);
             ctx[10] = H(20, chv, qe(pr[2] - pred, 24) * 256 + qe(pr[3] - pred, 24), 0);
             ctx[11] = H(21, chv, qe(Wv - pred, 24) * 256 + qe(Nv - pred, 24), qe(NEv - pred, 24));
+            if (fimgx) {
+                int eWW = hasWW ? err[i - 6] : 0, eNN = hasNN ? err[iN - stride] : 0;
+                ctx[12] = H(22, chv, (uint32_t)(Wv >> 3), (uint32_t)(Nv >> 3));
+                ctx[13] = H(23, chv, qe(eWW, 12) * 256 + qe(eNN, 12), 0);
+                ctx[14] = H(24, chv, (uint32_t)(pred >> 3), act);
+                ctx[15] = H(25, chv, ch ? qe(eP, 8) : 255, qe(eW, 6) * 256 + qe(eN, 6));
+            }
             if (!c->dec) { int s = (int8_t)(uint8_t)(data[i] - pred); sym = s >= 0 ? 2 * s : -2 * s - 1; }
         }
         int sel1 = img ? act : (fmsel ? msel : 0);
@@ -258,6 +284,19 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, int64_t wi
                 p2 = clampp(squash(d2));
                 d = (d + d2) >> 1;
             }
+            int p3 = 0, pf = 0, dd[3] = {0, 0, 0};
+            int32_t *w3 = W3 + ((img ? ch * 256 + (int)c0 : (int)((c4 & 0xFF) << 3 | bp)) & 2047) * MAXIN;
+            int32_t *wf = WF + (int)c0 * 3;
+            if (fmix3) {  /* replace the plain average with a learned final mixer */
+                int64_t dot1 = 0, dot2 = 0, dot3 = 0;
+                for (int k = 0; k < nin; k++) { dot1 += (int64_t)w1[k] * st[k]; dot2 += (int64_t)w2[k] * st[k]; dot3 += (int64_t)w3[k] * st[k]; }
+                dd[0] = (int)(dot1 >> 16); dd[1] = (int)(dot2 >> 16); dd[2] = (int)(dot3 >> 16);
+                for (int k = 0; k < 3; k++) dd[k] = dd[k] < -2047 ? -2047 : (dd[k] > 2047 ? 2047 : dd[k]);
+                p3 = clampp(squash(dd[2]));
+                int64_t df = (int64_t)wf[0] * dd[0] + (int64_t)wf[1] * dd[1] + (int64_t)wf[2] * dd[2];
+                d = (int)(df >> 16);
+                pf = clampp(squash(d));
+            }
             int p12 = squash(d), ai1 = 0, aw1 = 0, ai2 = 0, aw2 = 0;
             if (fmix2) {
                 int a = img ? (((int)c0 * 16 + act) * 3 + ch) : (int)(c0 | (c4 & 255) << 8);
@@ -273,6 +312,7 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, int64_t wi
             upd_w(w1, st, nin, (bit << 12) - p1);
             if (fmix2) {
                 upd_w(w2, st, nin, (bit << 12) - p2);
+                if (fmix3) { upd_w(w3, st, nin, (bit << 12) - p3); upd_w(wf, dd, 3, (bit << 12) - pf); }
                 apm_upd(A1, ai1, aw1, bit);
                 if (fapm2) apm_upd(A2, ai2, aw2, bit);
             }
@@ -306,13 +346,33 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, int64_t wi
         } else {
             if (c->dec) { int s = (v & 1) ? -((v + 1) >> 1) : (v >> 1); data[i] = (uint8_t)(pred + s); }
             err[i] = (int8_t)(uint8_t)(data[i] - pred);
+            if (fbias) {
+                BS[bctx * 2] += data[i] - predRaw;
+                if (++BS[bctx * 2 + 1] >= 32) { BS[bctx * 2] /= 2; BS[bctx * 2 + 1] /= 2; }
+            }
             for (int k = 0; k < np; k++) { int ek = iabs(data[i] - pr[k]); perr[i * np + k] = ek > 255 ? 255 : ek; }
         }
     }
     for (int k = 0; k < nctx; k++) free(T[k]);
-    free(W1); free(W2); free(A1); free(A2); free(MT); free(err); free(perr);
+    free(W1); free(W2); free(W3); free(WF); free(A1); free(A2); free(MT); free(err); free(perr);
 }
 
+static int e8e9_detect(const uint8_t *d, int64_t n) {
+    int64_t cnt = 0, good = 0;
+    for (int64_t i = 0; i + 4 < n; i++) if (d[i] == 0xE8 || d[i] == 0xE9) { cnt++; if (d[i + 4] == 0 || d[i + 4] == 0xFF) good++; }
+    return cnt > n / 256 && good * 2 > cnt;
+}
+/* x86 CALL/JMP rel32 -> absolute (fwd) and back; positions decided by the opcode byte, which is unchanged */
+static void e8e9(uint8_t *d, int64_t n, int fwd) {
+    for (int64_t i = 0; i + 4 < n;) {
+        if (d[i] == 0xE8 || d[i] == 0xE9) {
+            uint32_t v = d[i + 1] | d[i + 2] << 8 | d[i + 3] << 16 | (uint32_t)d[i + 4] << 24;
+            v = fwd ? v + (uint32_t)(i + 5) : v - (uint32_t)(i + 5);
+            d[i + 1] = v; d[i + 2] = v >> 8; d[i + 3] = v >> 16; d[i + 4] = v >> 24;
+            i += 5;
+        } else i++;
+    }
+}
 static void put32(uint8_t *p, uint32_t v) { for (int i = 0; i < 4; i++) p[i] = v >> (8 * i); }
 static uint32_t get32(const uint8_t *p) { return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24; }
 static uint8_t *slurp(const char *path, int64_t *n) {
@@ -331,6 +391,9 @@ int main(int argc, char **argv) {
         uint32_t feat = getenv("FEAT") ? (uint32_t)atoi(getenv("FEAT")) : 63;
         int bb = getenv("BB") ? atoi(getenv("BB")) : 18, limit = getenv("LIMIT") ? atoi(getenv("LIMIT")) : 255;
         uint8_t *data = slurp(in, &L);
+        if (getenv("LR")) LR = atoi(getenv("LR"));
+        feat &= ~64u;
+        if (mode == 1 && (getenv("E8") ? atoi(getenv("E8")) : 1) && e8e9_detect(data, L)) { e8e9(data, L, 1); feat |= 64; }
         Coder c = {0, 0xFFFFFFFFu, 0, NULL, 0, 0, 0, 0};
         for (int i = 0; i < HDR; i++) emit(&c, 0);
         run(&c, mode, bb, limit, feat, width, data, L);
@@ -350,7 +413,9 @@ int main(int argc, char **argv) {
         uint8_t *data = malloc(L ? L : 1);
         Coder c = {0, 0xFFFFFFFFu, 0, f + HDR, n - HDR, 0, 0, 1};
         for (int i = 0; i < 4; i++) c.x = (c.x << 8) | (c.pos < c.len ? c.buf[c.pos] : 0), c.pos++;
+        if (getenv("LR")) LR = atoi(getenv("LR"));
         run(&c, mode, bb, limit, feat, width, data, L);
+        if (feat & 64) e8e9(data, L, 0);
         FILE *o = fopen(argv[3], "wb"); fwrite(data, 1, L, o); fclose(o);
         return 0;
     }
