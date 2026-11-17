@@ -1,0 +1,16 @@
+browser: 156.0.8078.4
+Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/156.0.0.0 Safari/537.36
+data        lvl   ratio   js_enc  js_dec  wasm_enc wasm_dec  check
+text_1mb    L1  0.2870    0.54    0.52      0.36     0.26  identical+roundtrip
+text_1mb    L3  0.1917    2.92    2.93      2.06     2.07  identical+roundtrip
+text_1mb    L4  0.1864    3.16    3.23      2.63     2.40  identical+roundtrip
+noah        L1  0.2407    0.40    0.38      0.27     0.25  identical+roundtrip
+noah        L3  0.2255    1.03    0.87      0.69     0.64  identical+roundtrip
+noah        L4  0.2091    1.53    1.49      1.24     1.14  identical+roundtrip
+library     L1  0.5528    0.70    0.77      0.48     0.53  identical+roundtrip
+library     L3  0.5168    2.00    1.94      1.52     1.44  identical+roundtrip
+library     L4  0.4995    3.14    3.06      2.89     2.82  identical+roundtrip
+A_original  L1  0.3923   10.16    9.66      7.54     7.00  identical+roundtrip
+A_original  L3  0.3680   26.75   27.18     21.82    22.90  identical+roundtrip
+A_original  L4  0.3491   45.92   46.40     36.88    37.21  identical+roundtrip
+DONE

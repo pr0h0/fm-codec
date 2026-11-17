@@ -1,0 +1,72 @@
+tar (no compression) text_1mb.bin                   1000000     1003520   1.004     90.44    139.07 ok
+gzip -6            text_1mb.bin                   1000000      227288   0.227     14.93     70.33 ok
+gzip -9            text_1mb.bin                   1000000      225029   0.225      5.64     89.54 ok
+bzip2 -9           text_1mb.bin                   1000000      183750   0.184      8.37     11.80 ok
+zstd -19           text_1mb.bin                   1000000      184555   0.185      1.26    120.03 ok
+zstd -22 --ultra   text_1mb.bin                   1000000      184553   0.185      1.15    108.77 ok
+xz -9e             text_1mb.bin                   1000000      180760   0.181      1.23     40.41 ok
+tar (no compression) text_10mb.bin                 10000000    10004480   1.000    456.47    531.48 ok
+gzip -6            text_10mb.bin                 10000000     2280110   0.228     17.36    125.51 ok
+gzip -9            text_10mb.bin                 10000000     2252947   0.225      5.19    124.00 ok
+bzip2 -9           text_10mb.bin                 10000000     1792708   0.179      9.77     22.15 ok
+zstd -19           text_10mb.bin                 10000000     1661836   0.166      1.20    189.71 ok
+zstd -22 --ultra   text_10mb.bin                 10000000     1660299   0.166      1.01    272.98 ok
+xz -9e             text_10mb.bin                 10000000     1622964   0.162      1.20     54.82 ok
+tar (no compression) random_1mb.bin                 1000000     1003520   1.004     51.80     94.72 ok
+gzip -6            random_1mb.bin                 1000000     1000188   1.000     17.78     76.91 ok
+gzip -9            random_1mb.bin                 1000000     1000188   1.000     16.80     76.94 ok
+bzip2 -9           random_1mb.bin                 1000000     1005042   1.005      3.86      6.22 ok
+zstd -19           random_1mb.bin                 1000000     1000037   1.000      3.09    128.69 ok
+zstd -22 --ultra   random_1mb.bin                 1000000     1000037   1.000      4.64    168.72 ok
+xz -9e             random_1mb.bin                 1000000     1000108   1.000      2.42    140.41 ok
+tar (no compression) thumbref_noah.rgb               295680      307200   1.039     43.17     70.65 ok
+gzip -6            thumbref_noah.rgb               295680      116370   0.394      6.83     48.27 ok
+gzip -9            thumbref_noah.rgb               295680      114329   0.387      0.98     48.81 ok
+bzip2 -9           thumbref_noah.rgb               295680       85262   0.288      6.90     17.27 ok
+zstd -19           thumbref_noah.rgb               295680      102551   0.347      1.13     42.07 ok
+zstd -22 --ultra   thumbref_noah.rgb               295680      102551   0.347      1.26     52.20 ok
+xz -9e             thumbref_noah.rgb               295680       93036   0.315      0.98     18.82 ok
+tar (no compression) style_win_library.rgb           442368      450560   1.019     48.57     83.64 ok
+gzip -6            style_win_library.rgb           442368      323919   0.732     12.99     42.03 ok
+gzip -9            style_win_library.rgb           442368      323127   0.730      6.27     41.06 ok
+bzip2 -9           style_win_library.rgb           442368      292195   0.661      6.69     10.34 ok
+zstd -19           style_win_library.rgb           442368      316751   0.716      1.67     54.27 ok
+zstd -22 --ultra   style_win_library.rgb           442368      316736   0.716      1.71     67.04 ok
+xz -9e             style_win_library.rgb           442368      286232   0.647      1.18     14.16 ok
+tar (no compression) thumbnail-A-original.rgb       7077888     7086080   1.001    470.20    599.73 ok
+gzip -6            thumbnail-A-original.rgb       7077888     5689429   0.804     15.74     70.08 ok
+gzip -9            thumbnail-A-original.rgb       7077888     5685123   0.803     11.47     69.89 ok
+bzip2 -9           thumbnail-A-original.rgb       7077888     4560395   0.644      6.88      9.00 ok
+zstd -19           thumbnail-A-original.rgb       7077888     5248532   0.742      1.92    111.73 ok
+zstd -22 --ultra   thumbnail-A-original.rgb       7077888     5248531   0.742      2.08    127.70 ok
+xz -9e             thumbnail-A-original.rgb       7077888     4704872   0.665      1.74     13.31 ok
+zip -9             text_1mb.bin                   1000000      225172   0.225      5.47     61.27 ok
+7z LZMA2 -mx9      text_1mb.bin                   1000000      181044   0.181      1.90     32.80 ok
+7z PPMd -mx9       text_1mb.bin                   1000000      165952   0.166      3.80      4.69 ok
+rar -m5            text_1mb.bin                   1000000      191845   0.192      3.58     45.93 ok
+zip -9             text_10mb.bin                 10000000     2253091   0.225      5.51    113.55 ok
+7z LZMA2 -mx9      text_10mb.bin                 10000000     1628786   0.163      1.47     64.41 ok
+7z PPMd -mx9       text_10mb.bin                 10000000     1456670   0.146      3.62      3.40 ok
+rar -m5            text_10mb.bin                 10000000     1751824   0.175      2.83    113.82 ok
+zip -9             random_1mb.bin                 1000000     1000333   1.000     23.48     81.54 ok
+7z LZMA2 -mx9      random_1mb.bin                 1000000     1000218   1.000      3.83     95.53 ok
+7z PPMd -mx9       random_1mb.bin                 1000000     1026836   1.027      1.69      1.36 ok
+rar -m5            random_1mb.bin                 1000000     1000164   1.000      4.40     71.62 ok
+zip -9             thumbref_noah.rgb               295680      114477   0.387      1.07     40.49 ok
+7z LZMA2 -mx9      thumbref_noah.rgb               295680       93030   0.315      1.50     20.84 ok
+7z PPMd -mx9       thumbref_noah.rgb               295680       82981   0.281      3.51      2.84 ok
+rar -m5            thumbref_noah.rgb               295680      111981   0.379      2.81     20.76 ok
+zip -9             style_win_library.rgb           442368      323279   0.731      5.28     25.82 ok
+7z LZMA2 -mx9      style_win_library.rgb           442368      287491   0.650      3.35     11.17 ok
+7z PPMd -mx9       style_win_library.rgb           442368      297099   0.672      2.41      2.31 ok
+rar -m5            style_win_library.rgb           442368      321376   0.726      3.64     24.42 ok
+zip -9             thumbnail-A-original.rgb       7077888     5685278   0.803     12.20     79.38 ok
+7z LZMA2 -mx9      thumbnail-A-original.rgb       7077888     4703808   0.665      2.03     17.11 ok
+7z PPMd -mx9       thumbnail-A-original.rgb       7077888     4609699   0.651      1.71      1.48 ok
+rar -m5            thumbnail-A-original.rgb       7077888     4389537   0.620      1.20     61.51 ok
+zpaq -m5           text_1mb.bin                   1000000      140418   0.140      0.21      0.22 ok
+zpaq -m5           text_10mb.bin                 10000000     1224331   0.122      0.20      0.21 ok
+zpaq -m5           random_1mb.bin                 1000000     1001640   1.002      0.17      0.17 ok
+zpaq -m5           thumbref_noah.rgb               295680       69982   0.237      0.20      0.18 ok
+zpaq -m5           style_win_library.rgb           442368      252576   0.571      0.19      0.17 ok
+zpaq -m5           thumbnail-A-original.rgb       7077888     3543031   0.501      0.19      0.19 ok
