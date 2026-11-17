@@ -27,7 +27,9 @@ with neighbour-error contexts. It is lossless.
 
 | Path | What |
 |---|---|
-| `c/fm3.c` | current format (FM3, levels 0–5): C reference and spec |
+| `c/fm4.c` | current format (FM4, levels 0–5; bytes, image, audio, video): C reference and spec |
+| `bpl/fm4_core.bpl`, `bpl/fm4_cli.bpl`, `bpl/fm4_wasm.bpl`, `bpl/fm4wasm.mjs` | FM4 in BPL: core, native CLI, WebAssembly entry, JS host |
+| `c/fm3.c` | previous format (FM3, levels 0–5): C reference and spec |
 | `bpl/fm3_core.bpl`, `bpl/fm3_cli.bpl`, `bpl/fm3_wasm.bpl` | FM3 in BPL: shared core, native CLI, WebAssembly entry |
 | `bpl/fm3wasm.mjs` | JS host for `bpl/fm3.wasm` (browser / Node / Bun), same API as `js/fm3core.mjs` |
 | `js/fm3core.mjs`, `js/fm3.mjs` | FM3 pure JS port (browser-safe core + CLI) |
@@ -58,7 +60,47 @@ const fm2 = await loadFm2Wasm(await fetch("bpl/fm2.wasm"));
 const packed = fm2.encode(bytes, { level: 4, mode: "image", width: 2048 });
 ```
 
-## fm3 (current, C reference: `c/fm3.c`)
+## fm4 (current: `c/fm4.c`, `bpl/fm4_*.bpl`)
+
+fm4 adds to fm3: an online least-squares (OLS) pixel predictor, a 2-D match model and exact-colour
+contexts for images; four text contexts, a fourth mixer, mixer selection by context hit count and
+(level 5) per-context run inputs for text; a 16-bit mixer; and two new modes, **audio** (16-bit PCM)
+and **video** (raw RGB frames, uses the previous frame).
+
+```bash
+make c bpl4 wasm4 BPL=~/Projects/bpl3/bpl     # BPL needs a compiler with @[unchecked] (> 0.1.3)
+c/fm4 enc 4 bytes in.txt out.fm4              # levels 0..5
+c/fm4 enc 4 image 2048 in.rgb out.fm4         # raw RGB24, width
+c/fm4 enc 4 audio 2 in.pcm out.fm4            # raw 16-bit little-endian PCM, channels
+c/fm4 enc 4 video 640 360 in.rgb out.fm4      # raw RGB24 frames, width height
+c/fm4 dec out.fm4 restored
+```
+
+Measured on a corpus built from a source tree (`tools/make_corpus.sh`: 10 text types, 20 images) plus
+the earlier test files, fm4 vs fm3 at level 4: text and code -1.9% mean (level 5: -3.3%), images
+-15.2% mean (up to -36% on screenshots); every file is smaller.
+
+| Media (level 4, compressed / raw) | fm4 | best other tool |
+|---|---:|---:|
+| Audio, 12 clips of 20 s (speech, music, sax) | 0.097 - 0.530 | flac -8: 0.137 - 0.601 (fm4 is 6-45% smaller on every clip) |
+| Video, 10 frames 640x360: screen recording | 0.0055 | lossless x264: 0.0091 |
+| Video: stick-figure animation | 0.0110 | xz: 0.0204, x264: 0.0224 |
+| Video: animated background | 0.0532 | xz: 0.0942, ffv1: 0.1182 |
+| Video: camera footage | 0.2066 | ffv1: 0.2408 |
+
+Without the audio model (bytes mode) the same audio clips come out 5-60% larger than FLAC. The video
+mode has no motion compensation, so camera footage gains little over coding the frames as one image.
+Raw numbers: `bench/results/media_fm4.txt`.
+
+The BPL build produces byte-identical files (native and WebAssembly) and is 0.75-1.02x the time of the
+C build; the wasm build runs the model in 16 KB chunks so browsers switch to optimized code.
+`bench/results/fm4_c_vs_bpl.txt`, `fm4_bpl_opt.txt`. There is no JS port of fm4 yet (fm3 has one).
+
+fm4 is slow: about 0.3 MB/s for text and images at level 4, 0.2-0.4 MB/s for audio.
+The OLS predictor uses floating point; identical output across builds relies on IEEE doubles without
+fused multiply-add (`-ffp-contract=off` in the Makefile).
+
+## fm3 (previous format, C reference: `c/fm3.c`)
 
 fm3 replaces fm2's per-bit hash slots with checksummed 64-byte nibble buckets (one cache line per
 context per 4 bits), and adds: two match models, word / word-pair / column contexts, indirect
