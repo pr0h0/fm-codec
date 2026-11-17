@@ -148,14 +148,14 @@ static void apm_init(uint16_t *A, int n) {
     for (int k = 0; k < n; k++) for (int j = 0; j < 33; j++) A[k * 33 + j] = squash((j - 16) * 128) * 16;
 }
 
-#define OLSN 28
-typedef struct { int n, cnt; double m[OLSN][OLSN], b[OLSN], w[OLSN], x[OLSN]; } Ols;
+#define OLSN 40
+typedef struct { int n, cnt; double lam; double m[OLSN][OLSN], b[OLSN], w[OLSN], x[OLSN]; } Ols;
 static double ols_pred(Ols *o) { double s = 0; for (int k = 0; k < o->n; k++) s += o->w[k] * o->x[k]; return s; }
 static void ols_upd(Ols *o, double y) {
     int n = o->n; double L[OLSN][OLSN], z[OLSN];
     for (int j = 0; j < n; j++) {
-        for (int k = 0; k <= j; k++) o->m[j][k] = OLAM * o->m[j][k] + (1 - OLAM) * o->x[j] * o->x[k];
-        o->b[j] = OLAM * o->b[j] + (1 - OLAM) * o->x[j] * y;
+        for (int k = 0; k <= j; k++) o->m[j][k] = o->lam * o->m[j][k] + (1 - o->lam) * o->x[j] * o->x[k];
+        o->b[j] = o->lam * o->b[j] + (1 - o->lam) * o->x[j] * y;
     }
     if (++o->cnt < OSKIP) return;
     o->cnt = 0;
@@ -168,7 +168,7 @@ static void ols_upd(Ols *o, double y) {
     for (int j = n - 1; j >= 0; j--) { double v = z[j]; for (int t = j + 1; t < n; t++) v -= L[t][j] * o->w[t]; o->w[j] = v / L[j][j]; }
 }
 static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, uint32_t feat2, int64_t width, uint8_t *data, int64_t L) {
-    int img = mode == 2;
+    int img = mode == 2, aud = mode == 3, nchan = aud ? (int)width : 0;
     int XORD = !img && (feat2 & 1), XM4 = (feat & 256) && (feat2 & 2), XTXT = !img && (feat2 & 4), XRUN = !img && (feat2 & 8);
     int XOLS = img && (feat2 & 16), XWIDE = XOLS && (feat2 & 32), XCOL = img && (feat2 & 64), XIM = img && (feat2 & 128);
     int flite = (feat & (1u << 21)) != 0;
@@ -184,11 +184,13 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, uint32_t f
     int bword = nord, bsparse = bword + (fword ? 2 : 0), bind = bsparse + (fsparse ? 3 : 0), bcol = bind + (find ? 2 : 0);
     int btxt = bcol + (fcol ? 2 : 0), ntxt = XTXT ? 4 : 0;
     int nctx = img ? (flite ? 6 : 12 + (fimgx ? 4 : 0) + (XOLS ? 2 : 0) + (XCOL ? 2 : 0) + (XIM ? 1 : 0)) : btxt + ntxt;
+    if (aud) nctx = 10;
     int nimm = XIM ? 1 : 0;
     int nrun = XRUN ? nctx : 0;
     int nin = nctx * (fhist ? 2 : 1) + nrun + nimm + (fmatch ? 1 : 0) + (fm2nd ? 1 : 0) + 1;   /* + match(es) + bias */
     int np = img && !flite ? 9 + (XOLS ? 1 : 0) : 0;
     Ols *OL = calloc(3, sizeof(Ols)); OL[0].n = 10; OL[1].n = 14; OL[2].n = 15; if (XWIDE) for (int k = 0; k < 3; k++) OL[k].n += 10; int oin = 0;
+    for (int k = 0; k < 3; k++) OL[k].lam = OLAM;
 
     /* table size per context: low-cardinality contexts get small, cache-resident tables */
     static const int TB_IMG[16] = {8, 12, 12, 12, 16, 16, 0, 17, 0, 0, 0, 0, 17, 16, 16, 0};
@@ -200,6 +202,13 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, uint32_t f
         else { tb[0] = 6; tb[1] = 13 < bb ? 13 : bb; }      /* order 0, order 1 */
         if (fsparse) { tb[bsparse] = 13 < bb ? 13 : bb; tb[bsparse + 2] = 15 < bb ? 15 : bb; }
     }
+    if (aud) for (int k = 0; k < nctx; k++) tb[k] = bb < 16 ? bb : 16;
+    /* audio: per channel a long OLS (16 or 32 own samples + 4 of the neighbour channel) and a short fast one */
+    int an1 = (feat2 & 32 ? 32 : 16), an = an1 + (nchan > 1 ? 4 : 0);
+    Ols *AO = aud ? calloc(2 * nchan, sizeof(Ols)) : NULL;
+    for (int k = 0; k < nchan; k++) { AO[k].n = an; AO[k].lam = 0.998; AO[nchan + k].n = 8; AO[nchan + k].lam = 0.99; }
+    int16_t *aerr = aud ? calloc(L / 2 + 1, 2) : NULL;
+    int apred = 0, azig = 0, ahi = 0, aq = 0, ach = 0; uint32_t actx[16];
     uint32_t *T[MAXIN];
     for (int k = 0; k < nctx; k++) {
         size_t tsz = (size_t)16 << tb[k];
@@ -238,7 +247,49 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, uint32_t f
     for (int64_t i = 0; i < L; i++) {
         int ch = 0, act = 0, eP = 0, pred = 0, sym = 0, pr[NPRED];
         int mb = -1, lenq = 0, msel = 0, mb2 = -1, lenq2 = 0;
-        if (!img) {
+        if (aud) {
+#define SMP(j) ((int)(int16_t)(data[2 * (j)] | data[2 * (j) + 1] << 8))
+#define QA(d) ((uint32_t)((d) < 0 ? 20 - bitlen(-(d)) : 20 + bitlen(d)))
+            int bpos = (int)(i & 1); int64_t si = i >> 1, t = si / nchan;
+            if (bpos == 0) {
+                ach = (int)(si % nchan);
+                int s1 = t > 0 ? SMP(si - nchan) : 0, s2 = t > 1 ? SMP(si - 2 * nchan) : s1;
+                int p1 = s1, p2 = s1, p3 = 2 * s1 - s2;
+                if (t >= an1) {
+                    double *X = AO[ach].x, *Y = AO[nchan + ach].x;
+                    for (int k = 0; k < an1; k++) X[k] = SMP(si - (int64_t)(k + 1) * nchan);
+                    if (nchan > 1) {   /* neighbour channel: its sample at this time if already coded, then older ones */
+                        int oc = ach ? ach - 1 : nchan - 1; int64_t ob = t * nchan + oc - (ach ? 0 : nchan);
+                        for (int k = 0; k < 4; k++) X[an1 + k] = SMP(ob - (int64_t)k * nchan);
+                    }
+                    for (int k = 0; k < 8; k++) Y[k] = X[k];
+                    double v = floor(ols_pred(&AO[ach]) + 0.5); p1 = v < -32768 ? -32768 : v > 32767 ? 32767 : (int)v;
+                    v = floor(ols_pred(&AO[nchan + ach]) + 0.5); p2 = v < -32768 ? -32768 : v > 32767 ? 32767 : (int)v;
+                }
+                p3 = p3 < -32768 ? -32768 : p3 > 32767 ? 32767 : p3;
+                apred = p1;
+                int r1 = t > 0 ? aerr[si - nchan] : 0, r2 = t > 1 ? aerr[si - 2 * nchan] : 0, r3 = t > 2 ? aerr[si - 3 * nchan] : 0;
+                int ro = ach ? aerr[si - 1] : (t > 0 ? aerr[si - 1] : 0);
+                int e8 = 0; for (int k = 1; k <= 8; k++) if (t >= k) e8 += iabs(aerr[si - (int64_t)k * nchan]);
+                act = bitlen(iabs(r1) + iabs(r2) + iabs(r3)); if (act > 15) act = 15;
+                ctx[0] = 0;
+                ctx[1] = (uint32_t)act;
+                ctx[2] = (uint32_t)(bitlen(iabs(r1)) | bitlen(iabs(r2)) << 5);
+                ctx[3] = QA(p2 - p1);
+                ctx[4] = QA(p3 - p1) | (uint32_t)act << 8;
+                ctx[5] = QA(ro) | (uint32_t)act << 8;
+                ctx[6] = QA(r1) | QA(r2) << 8;
+                ctx[7] = (uint32_t)bitlen(e8);
+                ctx[8] = (uint32_t)bitlen(iabs(apred)) | (uint32_t)act << 8;
+                ctx[9] = QA(p1 - s1) | QA(p2 - p1) << 8;
+                for (int k = 0; k < nctx; k++) actx[k] = ctx[k];
+                aq = (int)QA(p2 - p1);
+                if (!c->dec) { int r = (int16_t)(SMP(si) - apred); azig = r >= 0 ? 2 * r : -2 * r - 1; }
+            }
+            for (int k = 0; k < nctx; k++) ctx[k] = H(80 + k, (uint32_t)(ach | bpos << 3), bpos ? (uint32_t)ahi : 0, actx[k]);
+            ch = bpos;
+            if (!c->dec) sym = bpos ? azig & 255 : azig >> 8;
+        } else if (!img) {
             for (int k = 0; k < nord; k++) {
                 int o = flite ? k + 1 : ORD[k];
                 uint32_t m = o >= 4 ? 0xFFFFFFFFu : ((1u << (8 * o)) - 1);
@@ -423,7 +474,7 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, uint32_t f
             }
             if (!c->dec) { int s = (int8_t)(uint8_t)(data[i] - pred); sym = s >= 0 ? 2 * s : -2 * s - 1; }
         }
-        int sel1 = img ? act : (fmsel ? msel : 0);
+        int sel1 = img ? act : aud ? act + 16 * ch : (fmsel ? msel : 0);
         uint32_t c0 = 1, node = 1;
         int mmiss = 0, mmiss2 = 0; imiss = 0; int ieb = -1, iqq = 0;
         for (int bp = 0; bp < 8; bp++) {
@@ -483,10 +534,10 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, uint32_t f
             st[n++] = 256;   /* bias */
             if (XIM) sel1 = act + 16 * (isym < 0 ? 0 : imiss ? 1 : iq < 4 ? 2 : iq < 12 ? 3 : 4);
             int16_t *w1 = W1 + (bp * 256 + (XORD ? sel1 * 16 + hord : sel1)) * MAXIN;
-            int16_t *w2 = W2 + (img ? ((bp * 3 + ch) * 32 + (ch ? (int)qe(eP, 15) - 49 : 0)) : (int)c0) * MAXIN;
-            int16_t *w3 = W3 + ((img ? ch * 256 + (int)c0 : (int)((c4 & 0xFF) << 3 | bp)) & 2047) * MAXIN;
+            int16_t *w2 = W2 + (img ? ((bp * 3 + ch) * 32 + (ch ? (int)qe(eP, 15) - 49 : 0)) : aud ? ch * 256 + (int)c0 : (int)c0) * MAXIN;
+            int16_t *w3 = W3 + ((img ? ch * 256 + (int)c0 : aud ? ((ch * 16 + act) * 8 + bp) + 1024 * (ach & 1) : (int)((c4 & 0xFF) << 3 | bp)) & 2047) * MAXIN;
             int32_t *wf = WF + (int)c0 * 4;
-            int16_t *w4 = W4 + (img ? (bp * 3 + ch) * 32 + (np > 9 ? (int)qe(pr[9] - pred, 15) - 49 : 0) : (int)((c4 >> 8 & 0xFF) << 3 | bp)) * MAXIN;
+            int16_t *w4 = W4 + (img ? (bp * 3 + ch) * 32 + (np > 9 ? (int)qe(pr[9] - pred, 15) - 49 : 0) : aud ? (bp * 2 + ch) * 64 + aq : (int)((c4 >> 8 & 0xFF) << 3 | bp)) * MAXIN;
             int d = dot16(w1, st, nin), p1 = clampp(squash(d)), p2 = 0, p3 = 0, p4 = 0, pf = 0, dd[4] = {0, 0, 0, 0}, nm = XM4 ? 4 : 3;
             if (fmix2) {
                 int d2 = dot16(w2, st, nin);
@@ -504,7 +555,7 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, uint32_t f
             }
             int p12 = squash(d), ai1 = 0, aw1 = 0, ai2 = 0, aw2 = 0, ai3 = 0, aw3 = 0, a3used = 0;
             if (fmix2) {
-                int pa = apm_p(A1, img ? (((int)c0 * 16 + act) * 3 + ch) : (int)(c0 | (c4 & 255) << 8), d, &ai1, &aw1);
+                int pa = apm_p(A1, img ? (((int)c0 * 16 + act) * 3 + ch) : aud ? (int)(c0 | (uint32_t)(act + 16 * ch) << 8) : (int)(c0 | (c4 & 255) << 8), d, &ai1, &aw1);
                 if (fapm2) {
                     int pb = apm_p(A2, (int)(((H(77, c4 & 0xFFFF, 0, 0) >> 22) << 8) | c0), d, &ai2, &aw2);
                     p12 = (2 * p12 + 3 * pa + 3 * pb) >> 3;
@@ -570,7 +621,19 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, uint32_t f
             node = node * 2 + bit;
         }
         int v = c0 & 255;
-        if (!img) {
+        if (aud) {
+            if (!(i & 1)) ahi = v;
+            else {
+                int64_t si = i >> 1;
+                if (c->dec) {
+                    int z = ahi << 8 | v, r = (z & 1) ? -((z + 1) >> 1) : (z >> 1), sv = (int16_t)(apred + r);
+                    data[i - 1] = (uint8_t)sv; data[i] = (uint8_t)(sv >> 8);
+                }
+                int sv = SMP(si);
+                aerr[si] = (int16_t)(sv - apred);
+                if (si / nchan >= an1) { ols_upd(&AO[ach], sv); ols_upd(&AO[nchan + ach], sv); }
+            }
+        } else if (!img) {
             if (c->dec) data[i] = v;
             for (int k = 0; k < nrun; k++) {
                 uint32_t r = rk[k][0] >> 16, b = r & 255, rc = r >> 8;
@@ -601,7 +664,7 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, uint32_t f
     }
     for (int k = 0; k < nctx; k++) free(T[k]);
     free(SM); free(W1); free(W2); free(W3); free(WF); free(A1); free(A2); free(A3);
-    free(MT); free(MT2); free(IND1); free(IND2); free(err); free(perr);
+    free(MT); free(MT2); free(IND1); free(IND2); free(err); free(perr); free(AO); free(aerr);
 }
 
 static int e8e9_detect(const uint8_t *d, int64_t n) {
@@ -645,7 +708,8 @@ static void header(uint8_t *h, int mode, int bb, int limit, int lr, uint32_t fea
 static uint8_t *fm4_encode(int level, int mode, int64_t width, uint8_t *data, int64_t L, int64_t *outLen) {
     static const uint32_t BL[6] = {0, B_L1, B_L2, B_L3, B_L4, B_L4}, IL[6] = {0, I_L1, I_L2, I_L3, I_L4, I_L4};
     static const uint32_t BL2[6] = {0, 0, 1, 1 | 4, 1 | 2 | 4, 1 | 2 | 4 | 8}, IL2[6] = {0, 0, 128, 128 | 64, 128 | 64 | 16 | 2, 128 | 64 | 16 | 2 | 32};
-    uint32_t feat = mode == 2 ? IL[level] : BL[level], feat2 = mode == 2 ? IL2[level] : BL2[level];
+    static const uint32_t AL[6] = {0, 0, 32, 32 | 256, 32 | 256 | 2048, 32 | 256 | 2048}, AL2[6] = {0, 0, 0, 2, 2 | 32, 2 | 32};
+    uint32_t feat = mode == 2 ? IL[level] : mode == 3 ? AL[level] : BL[level], feat2 = mode == 2 ? IL2[level] : mode == 3 ? AL2[level] : BL2[level];
     int bb = level == 5 && mode == 1 ? 19 : 18, limit = 255;
     if (getenv("FEAT")) feat = (uint32_t)atoi(getenv("FEAT"));
     if (getenv("FEAT2")) feat2 = (uint32_t)atoi(getenv("FEAT2"));
@@ -704,14 +768,15 @@ int main(int argc, char **argv) {
     init_tables();
     if (getenv("HUGE")) OPT_HUGE = atoi(getenv("HUGE"));
     if (argc >= 6 && !strcmp(argv[1], "enc")) {
-        int level = atoi(argv[2]), mode = !strcmp(argv[3], "image") ? 2 : 1;
-        int64_t width = mode == 2 ? atoll(argv[4]) : 0, L, n;
-        if (level < 0 || level > 5 || (mode == 2 && argc < 7)) goto usage;
+        int level = atoi(argv[2]), mode = !strcmp(argv[3], "image") ? 2 : !strcmp(argv[3], "audio") ? 3 : 1;
+        int64_t width = mode >= 2 ? atoll(argv[4]) : 0, L, n;
+        if (level < 0 || level > 5 || (mode >= 2 && argc < 7)) goto usage;
         if (getenv("LR")) LR = atoi(getenv("LR"));
-        uint8_t *data = slurp(argv[mode == 2 ? 5 : 4], &L);
+        uint8_t *data = slurp(argv[mode >= 2 ? 5 : 4], &L);
         if (mode == 2 && (width <= 0 || L % (3 * width))) { fprintf(stderr, "bad width\n"); return 1; }
+        if (mode == 3 && (width <= 0 || width > 8 || L % (2 * width))) { fprintf(stderr, "audio: need 1-8 channels and a whole number of 16-bit frames\n"); return 1; }
         uint8_t *o = fm4_encode(level, mode, width, data, L, &n);
-        return spit(argv[mode == 2 ? 6 : 5], o, n);
+        return spit(argv[mode >= 2 ? 6 : 5], o, n);
     }
     if (argc == 4 && !strcmp(argv[1], "dec")) {
         int64_t n, L; uint8_t *f = slurp(argv[2], &n);
