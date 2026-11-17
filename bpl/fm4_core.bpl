@@ -61,6 +61,11 @@ global S_W2H: uint = 0;
 global S_OLC0: int = 0;
 global S_OLC1: int = 0;
 global S_OLC2: int = 0;
+global S_APRED: int = 0;
+global S_AZIG: int = 0;
+global S_AHI: int = 0;
+global S_AQ: int = 0;
+global S_ACH: int = 0;
 # bytes per runChunk call
 global CHUNK: long = 16384;
 
@@ -195,6 +200,51 @@ frame bitlen10(v: int) ret int {
     return 0;
 }
 
+# bit length of v in 0..2^20-1
+@[unchecked]
+frame bitlen(v: int) ret int {
+    if (v >= 1024) {
+        return 10 + bitlen10(v >> 10);
+    }
+    return bitlen10(v);
+}
+
+# audio: signed log2 bucket of a difference (QA in c/fm4.c)
+@[unchecked]
+frame qa(d: int) ret uint {
+    if (d < 0) {
+        return cast<uint>(20 - bitlen(-d));
+    }
+    return cast<uint>(20 + bitlen(d));
+}
+
+# (int16_t)v
+@[unchecked]
+frame s16(v: int) ret int {
+    local s: int = v & 65535;
+    if (s > 32767) {
+        s = s - 65536;
+    }
+    return s;
+}
+
+# 16-bit little-endian sample j
+@[unchecked]
+frame smp(d: *u8, j: long) ret int {
+    return s16(cast<int>(d[2 * j]) | (cast<int>(d[2 * j + 1]) << 8));
+}
+
+@[unchecked]
+frame clamp16(v: double) ret int {
+    if (v < -32768.0) {
+        return -32768;
+    }
+    if (v > 32767.0) {
+        return 32767;
+    }
+    return cast<int>(v);
+}
+
 @[unchecked]
 frame qe(e: int, lim: int) ret uint {
     local v: int = e;
@@ -297,26 +347,25 @@ frame pix24(d: *u8, i: long) ret uint {
     return cast<uint>(d[i]) | (cast<uint>(d[i + 1]) << 8) | (cast<uint>(d[i + 2]) << 16);
 }
 
-# ---- online least squares (one state block per channel: m[28][28], b[28], w[28], x[28]) ----
+# ---- online least squares (one state block per channel: m[40][40], b[40], w[40], x[40] = 1720 doubles) ----
 @[unchecked]
 frame olsPred(o: *double, n: int) ret double {
     local s: double = 0.0;
     loop (local k: int = 0; k < n; k = k + 1) {
-        s = s + o[812 + k] * o[840 + k];
+        s = s + o[1640 + k] * o[1680 + k];
     }
     return s;
 }
 
-# Lm: scratch [28][28] + z[28]. cnt: samples since the last solve.
+# Lm: scratch [40][40] + z[40]. lam: forgetting factor. cnt: samples since the last solve.
 @[unchecked]
-frame olsUpd(o: *double, Lm: *double, n: int, cnt: *int, y: double) {
-    local lam: double = 0.998;
-    local oml: double = 1.0 - 0.998;
+frame olsUpd(o: *double, Lm: *double, n: int, cnt: *int, lam: double, y: double) {
+    local oml: double = 1.0 - lam;
     loop (local j: int = 0; j < n; j = j + 1) {
         loop (local k: int = 0; k <= j; k = k + 1) {
-            o[j * 28 + k] = lam * o[j * 28 + k] + oml * o[840 + j] * o[840 + k];
+            o[j * 40 + k] = lam * o[j * 40 + k] + oml * o[1680 + j] * o[1680 + k];
         }
-        o[784 + j] = lam * o[784 + j] + oml * o[840 + j] * y;
+        o[1600 + j] = lam * o[1600 + j] + oml * o[1680 + j] * y;
     }
     cnt[0] = cnt[0] + 1;
     if (cnt[0] < 4) {
@@ -325,33 +374,33 @@ frame olsUpd(o: *double, Lm: *double, n: int, cnt: *int, y: double) {
     cnt[0] = 0;
     loop (local j: int = 0; j < n; j = j + 1) {
         loop (local k: int = 0; k <= j; k = k + 1) {
-            local v: double = o[j * 28 + k] + ((j == k) ? 0.001 : 0.0);
+            local v: double = o[j * 40 + k] + ((j == k) ? 0.001 : 0.0);
             loop (local t: int = 0; t < k; t = t + 1) {
-                v = v - Lm[j * 28 + t] * Lm[k * 28 + t];
+                v = v - Lm[j * 40 + t] * Lm[k * 40 + t];
             }
             if (j == k) {
                 if (v <= 0.0) {
                     return;
                 }
-                Lm[j * 28 + j] = sqrt(v);
+                Lm[j * 40 + j] = sqrt(v);
             } else {
-                Lm[j * 28 + k] = v / Lm[k * 28 + k];
+                Lm[j * 40 + k] = v / Lm[k * 40 + k];
             }
         }
     }
     loop (local j: int = 0; j < n; j = j + 1) {
-        local v: double = o[784 + j];
+        local v: double = o[1600 + j];
         loop (local t: int = 0; t < j; t = t + 1) {
-            v = v - Lm[j * 28 + t] * Lm[784 + t];
+            v = v - Lm[j * 40 + t] * Lm[1600 + t];
         }
-        Lm[784 + j] = v / Lm[j * 28 + j];
+        Lm[1600 + j] = v / Lm[j * 40 + j];
     }
     loop (local j: int = n - 1; j >= 0; j = j - 1) {
-        local v: double = Lm[784 + j];
+        local v: double = Lm[1600 + j];
         loop (local t: int = j + 1; t < n; t = t + 1) {
-            v = v - Lm[t * 28 + j] * o[812 + t];
+            v = v - Lm[t * 40 + j] * o[1640 + t];
         }
-        o[812 + j] = v / Lm[j * 28 + j];
+        o[1640 + j] = v / Lm[j * 40 + j];
     }
 }
 
@@ -496,6 +545,9 @@ frame nCtx(img: bool, feat: uint, feat2: uint) ret int {
         if (hasF(feat2, cast<uint>(128))) {
             m = m + 1;
         }
+        if (hasF(feat2, cast<uint>(256))) {
+            m = m + 3;
+        }
         return m;
     }
     local n: int = nOrd(img, feat);
@@ -558,12 +610,18 @@ frame tableBits(img: bool, feat: uint, bb: int, k: int) ret int {
 }
 
 # bytes run() takes from the arena (every block is rounded up to 64; 4096 covers the rounding)
-frame arenaSize(mode: int, bb: int, feat: uint, feat2: uint, L: long) ret long {
+# nchan: audio channel count (mode 3)
+frame arenaSize(mode: int, bb: int, feat: uint, feat2: uint, L: long, nchan: long) ret long {
     local img: bool = mode == 2;
-    local nctx: int = nCtx(img, feat, feat2);
+    local aud: bool = mode == 3;
+    local nctx: int = aud ? 10 : nCtx(img, feat, feat2);
     local total: long = 4096;
     loop (local k: int = 0; k < nctx; k = k + 1) {
-        total = total + (cast<long>(64) << cast<long>(tableBits(img, feat, bb, k)));
+        total = total + (cast<long>(64) << cast<long>(aud ? minBits(16, bb) : tableBits(img, feat, bb, k)));
+    }
+    if (aud) {
+        # OLS blocks + scratch, aerr, actx, OLS counters
+        total = total + 2 * nchan * 1720 * 8 + 1640 * 8 + (L / 2 + 1) * 2 + 64 + 2 * nchan * 4;
     }
     # SM, W1, W2, W3, W4, WF, RP, RN, saved match predictors (3 * 64 u16 + 3 * 64 u8)
     total = total + 64 * 6 + 64 * 3 + 96 * 256 * 4 + 2048 * 96 * 2 + 768 * 96 * 2 + 2048 * 96 * 2 + 4096 * 96 * 2 + 256 * 4 * 4 + 96 * 64 * 2 + 96 * 64;
@@ -589,13 +647,13 @@ frame arenaSize(mode: int, bb: int, feat: uint, feat2: uint, L: long) ret long {
     if (img) {
         total = total + (L + 1) * 2;
         if (!hasF(feat, cast<uint>(2097152))) {
-            total = total + (L + 1) * 10;
+            total = total + (L + 1) * 12;
         }
         if (hasF(feat2, cast<uint>(128))) {
             total = total + 4194304 * 4;
         }
         if (hasF(feat2, cast<uint>(16))) {
-            total = total + (3 * 868 + 812) * 8;
+            total = total + (3 * 1720 + 1640) * 8;
         }
     }
     return total;
@@ -608,9 +666,15 @@ frame arenaSize(mode: int, bb: int, feat: uint, feat2: uint, L: long) ret long {
 # WebAssembly engines only switch a function to optimized code when it is entered again: one call
 # for the whole input would run in baseline code to the end.
 @[noinline]
-frame runChunk(mode: int, bb: int, limit: int, feat: uint, feat2: uint, width: long, data: *u8, L: long, i0: long, i1: long) {
+frame runChunk(mode: int, bb: int, limit: int, feat: uint, feat2: uint, widthF: long, data: *u8, L: long, i0: long, i1: long) {
     local first: bool = i0 == 0;
     local img: bool = mode == 2;
+    local aud: bool = mode == 3;
+    local nchan: long = aud ? widthF : 0;
+    # video = image mode with feat2 bit 256: width field = width | frame height << 16
+    local fvid: bool = img && hasF(feat2, cast<uint>(256));
+    local width: long = fvid ? (widthF & 65535) : widthF;
+    local fh: long = fvid ? (widthF >> 16) : 0;
     local XORD: bool = !img && hasF(feat2, cast<uint>(1));
     local XM4: bool = hasF(feat, cast<uint>(256)) && hasF(feat2, cast<uint>(2));
     local XTXT: bool = !img && hasF(feat2, cast<uint>(4));
@@ -647,23 +711,24 @@ frame runChunk(mode: int, bb: int, limit: int, feat: uint, feat2: uint, width: l
     local bind: int = bsparse + (fsparse ? 3 : 0);
     local bcol: int = bind + (find ? 2 : 0);
     local btxt: int = bcol + (fcol ? 2 : 0);
-    local nctx: int = nCtx(img, feat, feat2);
+    local nctx: int = aud ? 10 : nCtx(img, feat, feat2);
     local nimm: int = XIM ? 1 : 0;
     local nrun: int = XRUN ? nctx : 0;
     local nin: int = nctx * (fhist ? 2 : 1) + nrun + nimm + (fmatch ? 1 : 0) + (fm2nd ? 1 : 0) + 1;
     local np: int = 0;
     if (img && !flite) {
-        np = XOLS ? 10 : 9;
+        np = 9 + (XOLS ? 1 : 0) + (fvid ? 2 : 0);
     }
     local npl: long = cast<long>(np);
     local nm: int = XM4 ? 4 : 3;
-    # first image context after the fixed 12 (+4): OLS pair, then colour pair, then 2-D match
+    # first image context after the fixed 12 (+4): OLS pair, colour pair, previous-frame triple, 2-D match
     local jols: int = 12 + (fimgx ? 4 : 0);
     local jcol: int = jols + (XOLS ? 2 : 0);
-    local jim: int = jcol + (XCOL ? 2 : 0);
+    local jvid: int = jcol + (XCOL ? 2 : 0);
+    local jim: int = jvid + (fvid ? 3 : 0);
 
     if (first) {
-        arenaReset(arenaSize(mode, bb, feat, feat2, L));
+        arenaReset(arenaSize(mode, bb, feat, feat2, L, nchan));
     } else {
         AR_USED = 0;
     }
@@ -671,7 +736,7 @@ frame runChunk(mode: int, bb: int, limit: int, feat: uint, feat2: uint, width: l
     local tOff: long[96];
     local tTotal: long = 0;
     loop (local k: int = 0; k < nctx; k = k + 1) {
-        tb[k] = tableBits(img, feat, bb, k);
+        tb[k] = aud ? minBits(16, bb) : tableBits(img, feat, bb, k);
         tOff[k] = tTotal;
         tTotal = tTotal + (cast<long>(16) << cast<long>(tb[k]));
     }
@@ -721,18 +786,47 @@ frame runChunk(mode: int, bb: int, limit: int, feat: uint, feat2: uint, width: l
     }
     local RP: *u16 = cast<*u16>(arenaTake(96 * 64 * 2));
     local RN: *u8 = arenaTake(96 * 64);
-    # OLS: 3 channel blocks of 868 doubles, then the Cholesky scratch (784 + 28)
+    # OLS: 3 channel blocks of 1720 doubles, then the Cholesky scratch (1600 + 40)
     local OL: *double = cast<*double>(nullptr);
     local OLm: *double = cast<*double>(nullptr);
     local oln: int[3] = [10, 14, 15];
     local olc: int[3] = [S_OLC0, S_OLC1, S_OLC2];
     if (XOLS) {
-        OL = cast<*double>(arenaTake((3 * 868 + 812) * 8));
-        OLm = cast<*double>(ptrAdd(cast<*u8>(OL), 3 * 868 * 8));
+        OL = cast<*double>(arenaTake((3 * 1720 + 1640) * 8));
+        OLm = cast<*double>(ptrAdd(cast<*u8>(OL), 3 * 1720 * 8));
         if (XWIDE) {
             oln[0] = 20;
             oln[1] = 24;
             oln[2] = 25;
+        }
+        if (fvid) {
+            oln[0] = oln[0] + 4;
+            oln[1] = oln[1] + 4;
+            oln[2] = oln[2] + 4;
+        }
+    }
+    # audio: per channel a long OLS (16 or 32 own samples + 4 of the neighbour channel) then a short
+    # one (blocks 0..nchan-1 and nchan..2*nchan-1), the scratch, the residuals, the contexts of the
+    # current sample and the per-block solve counters
+    local an1: int = hasF(feat2, cast<uint>(32)) ? 32 : 16;
+    local an: int = an1 + ((nchan > 1) ? 4 : 0);
+    local AO: *double = cast<*double>(nullptr);
+    local AOm: *double = cast<*double>(nullptr);
+    local aerr: *i16 = cast<*i16>(nullptr);
+    local actx: *uint = cast<*uint>(nullptr);
+    local acnt: *int = cast<*int>(nullptr);
+    if (aud) {
+        AO = cast<*double>(arenaTake(2 * nchan * 1720 * 8));
+        AOm = cast<*double>(arenaTake(1640 * 8));
+        aerr = cast<*i16>(arenaTake((L / 2 + 1) * 2));
+        actx = cast<*uint>(arenaTake(64));
+        acnt = cast<*int>(arenaTake(2 * nchan * 4));
+        if (first) {
+            memset(cast<*void>(AO), 0, 2 * nchan * 1720 * 8);
+            memset(cast<*void>(AOm), 0, 1640 * 8);
+            memset(cast<*void>(aerr), 0, (L / 2 + 1) * 2);
+            memset(cast<*void>(actx), 0, 64);
+            memset(cast<*void>(acnt), 0, 2 * nchan * 4);
         }
     }
     # match predictors between calls: MP, MP2, IMP then MN, MN2, IMN
@@ -800,7 +894,7 @@ frame runChunk(mode: int, bb: int, limit: int, feat: uint, feat2: uint, width: l
             RN[j] = cast<u8>(0);
         }
         if (XOLS) {
-            memset(cast<*void>(OL), 0, (3 * 868 + 812) * 8);
+            memset(cast<*void>(OL), 0, (3 * 1720 + 1640) * 8);
         }
         olc[0] = 0;
         olc[1] = 0;
@@ -875,7 +969,17 @@ frame runChunk(mode: int, bb: int, limit: int, feat: uint, feat2: uint, width: l
     local w0: uint = 0;
     local w1h: uint = 0;
     local w2h: uint = 0;
+    local apred: int = 0;
+    local azig: int = 0;
+    local ahi: int = 0;
+    local aq: int = 0;
+    local ach: int = 0;
     if (!first) {
+        apred = S_APRED;
+        azig = S_AZIG;
+        ahi = S_AHI;
+        aq = S_AQ;
+        ach = S_ACH;
         mptr = S_MPTR;
         mlen = S_MLEN;
         mptr2 = S_MPTR2;
@@ -925,7 +1029,81 @@ frame runChunk(mode: int, bb: int, limit: int, feat: uint, feat2: uint, width: l
         local msel: int = 0;
         local mb2: int = -1;
         local lenq2: int = 0;
-        if (!img) {
+        if (aud) {
+            local bpos: int = cast<int>(i & 1);
+            local si: long = i >> 1;
+            local t: long = si / nchan;
+            if (bpos == 0) {
+                ach = cast<int>(si % nchan);
+                local as1: int = (t > 0) ? smp(data, si - nchan) : 0;
+                local as2: int = (t > 1) ? smp(data, si - 2 * nchan) : as1;
+                local ap1: int = as1;
+                local ap2: int = as1;
+                local ap3: int = 2 * as1 - as2;
+                if (t >= cast<long>(an1)) {
+                    local AX: *double = cast<*double>(ptrAdd(cast<*u8>(AO), (cast<long>(ach) * 1720 + 1680) * 8));
+                    local AY: *double = cast<*double>(ptrAdd(cast<*u8>(AO), ((nchan + cast<long>(ach)) * 1720 + 1680) * 8));
+                    loop (local k: int = 0; k < an1; k = k + 1) {
+                        AX[k] = cast<double>(smp(data, si - cast<long>(k + 1) * nchan));
+                    }
+                    if (nchan > 1) {
+                        # neighbour channel: its sample at this time if already coded, then older ones
+                        local ob: long = t * nchan + cast<long>(ach) - 1;
+                        loop (local k: int = 0; k < 4; k = k + 1) {
+                            AX[an1 + k] = cast<double>(smp(data, ob - cast<long>(k) * nchan));
+                        }
+                    }
+                    loop (local k: int = 0; k < 8; k = k + 1) {
+                        AY[k] = AX[k];
+                    }
+                    ap1 = clamp16(floor(olsPred(cast<*double>(ptrAdd(cast<*u8>(AO), cast<long>(ach) * 1720 * 8)), an) + 0.5));
+                    ap2 = clamp16(floor(olsPred(cast<*double>(ptrAdd(cast<*u8>(AO), (nchan + cast<long>(ach)) * 1720 * 8)), 8) + 0.5));
+                }
+                if (ap3 < -32768) {
+                    ap3 = -32768;
+                } else if (ap3 > 32767) {
+                    ap3 = 32767;
+                }
+                apred = ap1;
+                local ar1: int = (t > 0) ? cast<int>(aerr[si - nchan]) : 0;
+                local ar2: int = (t > 1) ? cast<int>(aerr[si - 2 * nchan]) : 0;
+                local ar3: int = (t > 2) ? cast<int>(aerr[si - 3 * nchan]) : 0;
+                local aro: int = (ach > 0 || t > 0) ? cast<int>(aerr[si - 1]) : 0;
+                local ae8: int = 0;
+                loop (local k: int = 1; k <= 8; k = k + 1) {
+                    if (t >= cast<long>(k)) {
+                        ae8 = ae8 + iabs(cast<int>(aerr[si - cast<long>(k) * nchan]));
+                    }
+                }
+                act = bitlen(iabs(ar1) + iabs(ar2) + iabs(ar3));
+                if (act > 15) {
+                    act = 15;
+                }
+                local actu: uint = cast<uint>(act) << 8;
+                actx[0] = cast<uint>(0);
+                actx[1] = cast<uint>(act);
+                actx[2] = cast<uint>(bitlen(iabs(ar1)) | (bitlen(iabs(ar2)) << 5));
+                actx[3] = qa(ap2 - ap1);
+                actx[4] = qa(ap3 - ap1) | actu;
+                actx[5] = qa(aro) | actu;
+                actx[6] = qa(ar1) | (qa(ar2) << 8);
+                actx[7] = cast<uint>(bitlen(ae8));
+                actx[8] = cast<uint>(bitlen(iabs(apred))) | actu;
+                actx[9] = qa(ap1 - as1) | (qa(ap2 - ap1) << 8);
+                aq = cast<int>(qa(ap2 - ap1));
+                if (!dec) {
+                    local ares: int = s16(smp(data, si) - apred);
+                    azig = (ares >= 0) ? 2 * ares : -2 * ares - 1;
+                }
+            }
+            loop (local k: int = 0; k < nctx; k = k + 1) {
+                ctx[k] = hash4(cast<uint>(80 + k), cast<uint>(ach | (bpos << 3)), (bpos != 0) ? cast<uint>(ahi) : z, actx[k]);
+            }
+            ch = bpos;
+            if (!dec) {
+                sym = (bpos != 0) ? (azig & 255) : (azig >> 8);
+            }
+        } else if (!img) {
             loop (local k: int = 0; k < nord; k = k + 1) {
                 local o: int = k;
                 if (flite) {
@@ -1094,6 +1272,11 @@ frame runChunk(mode: int, bb: int, limit: int, feat: uint, feat2: uint, width: l
             } else {
                 pr[0] = Wv + Nv - NWv;
             }
+            local fb: long = stride * fh;
+            local hasP: bool = fvid && i >= fb;
+            local Pv: int = hasP ? cast<int>(data[i - fb]) : 0;
+            local PWv: int = (hasP && hasW) ? cast<int>(data[i - fb - 3]) : Pv;
+            local PNv: int = (hasP && i - fb - stride >= 0) ? cast<int>(data[i - fb - stride]) : Pv;
             pred = pr[0];
             if (np > 0) {
                 pr[1] = clamp255(Wv + Nv - NWv);
@@ -1127,7 +1310,7 @@ frame runChunk(mode: int, bb: int, limit: int, feat: uint, feat2: uint, width: l
                     oin = x >= 3 && y >= 3 && x < width - 3;
                     pr[9] = pr[0];
                     if (oin) {
-                        local X: *double = cast<*double>(ptrAdd(cast<*u8>(OL), cast<long>(ch * 868 + 840) * 8));
+                        local X: *double = cast<*double>(ptrAdd(cast<*u8>(OL), cast<long>(ch * 1720 + 1680) * 8));
                         local s2: long = 2 * stride;
                         X[0] = cast<double>(cast<int>(data[iW]));
                         X[1] = cast<double>(cast<int>(data[iN]));
@@ -1148,8 +1331,15 @@ frame runChunk(mode: int, bb: int, limit: int, feat: uint, feat2: uint, width: l
                         if (ch == 2) {
                             X[14] = cast<double>(cast<int>(data[i - 2]));
                         }
+                        if (fvid) {
+                            local bv4: int = oln[ch] - 4;
+                            X[bv4] = cast<double>(Pv);
+                            X[bv4 + 1] = cast<double>(PWv);
+                            X[bv4 + 2] = cast<double>(PNv);
+                            X[bv4 + 3] = hasP ? cast<double>(cast<int>(data[i - fb + 3])) : 0.0;
+                        }
                         if (XWIDE) {
-                            local b: int = oln[ch] - 10;
+                            local b: int = oln[ch] - 10 - (fvid ? 4 : 0);
                             X[b] = cast<double>(cast<int>(data[i - 9]));
                             X[b + 1] = cast<double>(cast<int>(data[(iN - 9 < 0) ? iN : iN - 9]));
                             X[b + 2] = cast<double>(cast<int>(data[(iN + 9 >= i) ? iN : iN + 9]));
@@ -1161,7 +1351,7 @@ frame runChunk(mode: int, bb: int, limit: int, feat: uint, feat2: uint, width: l
                             X[b + 8] = (ch > 0) ? cast<double>(cast<int>(data[i - s2 - 1])) : 0.0;
                             X[b + 9] = (ch == 2) ? cast<double>(cast<int>(data[iW - 2])) : 0.0;
                         }
-                        local ov: double = floor(olsPred(cast<*double>(ptrAdd(cast<*u8>(OL), cast<long>(ch * 868) * 8)), oln[ch]) + 0.5);
+                        local ov: double = floor(olsPred(cast<*double>(ptrAdd(cast<*u8>(OL), cast<long>(ch * 1720) * 8)), oln[ch]) + 0.5);
                         if (ov < 0.0) {
                             pr[9] = 0;
                         } else if (ov > 255.0) {
@@ -1170,6 +1360,11 @@ frame runChunk(mode: int, bb: int, limit: int, feat: uint, feat2: uint, width: l
                             pr[9] = cast<int>(ov);
                         }
                     }
+                }
+                if (fvid) {
+                    # previous frame: same pixel, and same pixel + spatial change since then
+                    pr[np - 2] = hasP ? Pv : pr[0];
+                    pr[np - 1] = hasP ? clamp255(Pv + Wv - PWv) : pr[0];
                 }
                 local num: long = 0;
                 local den: long = 0;
@@ -1260,6 +1455,11 @@ frame runChunk(mode: int, bb: int, limit: int, feat: uint, feat2: uint, width: l
                 }
                 ctx[jcol + 1] = hash4(cast<uint>(29), chv, cast<uint>(cp1 | (cp2 << 8) | (Wv << 16)), cast<uint>(cd) * cast<uint>(256) + cast<uint>(Nv));
             }
+            if (fvid) {
+                ctx[jvid] = hash4(cast<uint>(31), chv, hasP ? qe(Pv - pred, 40) : cast<uint>(999), z);
+                ctx[jvid + 1] = hash4(cast<uint>(32), chv, hasP ? cast<uint>(Pv) : cast<uint>(999), qe(pr[0] - pred, 10));
+                ctx[jvid + 2] = hash4(cast<uint>(33), chv, hasP ? qe(Pv - pred, 10) * cast<uint>(256) + qe(PWv - Wv, 10) : cast<uint>(99999), qe(PNv - Nv, 10));
+            }
             if (XIM) {
                 if (ch == 0) {
                     if (imlen > 0 && imok) {
@@ -1308,6 +1508,8 @@ frame runChunk(mode: int, bb: int, limit: int, feat: uint, feat2: uint, width: l
         local sel1: int = 0;
         if (img) {
             sel1 = act;
+        } else if (aud) {
+            sel1 = act + 16 * ch;
         } else if (fmsel) {
             sel1 = msel;
         }
@@ -1466,6 +1668,10 @@ frame runChunk(mode: int, bb: int, limit: int, feat: uint, feat2: uint, width: l
                 w2o = ((bp * 3 + ch) * 32 + sel2) * 96;
                 w3o = ((ch * 256 + cast<int>(c0)) & 2047) * 96;
                 w4o = ((bp * 3 + ch) * 32 + w4sel) * 96;
+            } else if (aud) {
+                w2o = (ch * 256 + cast<int>(c0)) * 96;
+                w3o = ((((ch * 16 + act) * 8 + bp) + 1024 * (ach & 1)) & 2047) * 96;
+                w4o = ((bp * 2 + ch) * 64 + aq) * 96;
             } else {
                 w3o = (cast<int>(((c4 & cast<uint>(0xFF)) << 3) | cast<uint>(bp)) & 2047) * 96;
                 w4o = cast<int>((((c4 >> 8) & cast<uint>(0xFF)) << 3) | cast<uint>(bp)) * 96;
@@ -1515,6 +1721,8 @@ frame runChunk(mode: int, bb: int, limit: int, feat: uint, feat2: uint, width: l
                 local a1c: int = 0;
                 if (img) {
                     a1c = (cast<int>(c0) * 16 + act) * 3 + ch;
+                } else if (aud) {
+                    a1c = cast<int>(c0) | ((act + 16 * ch) << 8);
                 } else {
                     a1c = cast<int>(c0 | ((c4 & cast<uint>(255)) << 8));
                 }
@@ -1692,7 +1900,27 @@ frame runChunk(mode: int, bb: int, limit: int, feat: uint, feat2: uint, width: l
             node = node * 2 + cast<long>(bit);
         }
         local v: int = cast<int>(c0 & cast<uint>(255));
-        if (!img) {
+        if (aud) {
+            if ((i & 1) == 0) {
+                ahi = v;
+            } else {
+                local sj: long = i >> 1;
+                if (dec) {
+                    local zz: int = (ahi << 8) | v;
+                    local zr: int = ((zz & 1) != 0) ? -((zz + 1) >> 1) : (zz >> 1);
+                    local dsv: int = s16(apred + zr);
+                    data[i - 1] = cast<u8>(dsv & 255);
+                    data[i] = cast<u8>((dsv >> 8) & 255);
+                }
+                local asv: int = smp(data, sj);
+                aerr[sj] = cast<i16>(s16(asv - apred));
+                if (sj / nchan >= cast<long>(an1)) {
+                    local achl: long = cast<long>(ach);
+                    olsUpd(cast<*double>(ptrAdd(cast<*u8>(AO), achl * 1720 * 8)), AOm, an, &acnt[achl], 0.998, cast<double>(asv));
+                    olsUpd(cast<*double>(ptrAdd(cast<*u8>(AO), (nchan + achl) * 1720 * 8)), AOm, 8, &acnt[nchan + achl], 0.99, cast<double>(asv));
+                }
+            }
+        } else if (!img) {
             if (dec) {
                 data[i] = cast<u8>(v);
             }
@@ -1761,7 +1989,7 @@ frame runChunk(mode: int, bb: int, limit: int, feat: uint, feat2: uint, width: l
                 imok = false;
             }
             if (XOLS && oin) {
-                olsUpd(cast<*double>(ptrAdd(cast<*u8>(OL), cast<long>(ch * 868) * 8)), OLm, oln[ch], &olc[ch], cast<double>(di));
+                olsUpd(cast<*double>(ptrAdd(cast<*u8>(OL), cast<long>(ch * 1720) * 8)), OLm, oln[ch], &olc[ch], 0.998, cast<double>(di));
             }
         }
     }
@@ -1790,6 +2018,11 @@ frame runChunk(mode: int, bb: int, limit: int, feat: uint, feat2: uint, width: l
     S_OLC0 = olc[0];
     S_OLC1 = olc[1];
     S_OLC2 = olc[2];
+    S_APRED = apred;
+    S_AZIG = azig;
+    S_AHI = ahi;
+    S_AQ = aq;
+    S_ACH = ach;
     loop (local j: int = 0; j < 64; j = j + 1) {
         SVP[j] = MP[j];
         SVP[64 + j] = MP2[j];
@@ -1926,6 +2159,10 @@ frame levelFeat(level: int, mode: int) ret uint {
     local il2: uint = cast<uint>(1048576);
     local il3: uint = il2 | cast<uint>(32);
     local il4: uint = il3 | cast<uint>(256 | 512);
+    if (mode == 3) {
+        local al: uint[6] = [0, 0, 32, 288, 2336, 2336];
+        return al[level];
+    }
     if (mode == 2) {
         if (level == 1) {
             return il1;
@@ -1953,6 +2190,10 @@ frame levelFeat(level: int, mode: int) ret uint {
 frame levelFeat2(level: int, mode: int) ret uint {
     local bl2: uint[6] = [0, 0, 1, 5, 7, 15];
     local il2: uint[6] = [0, 0, 128, 192, 210, 242];
+    local al2: uint[6] = [0, 0, 0, 2, 34, 34];
+    if (mode == 3) {
+        return al2[level];
+    }
     return (mode == 2) ? il2[level] : bl2[level];
 }
 
@@ -1968,6 +2209,10 @@ frame fm4Encode(level: int, mode: int, width: long, data: *u8, L: long) ret long
         local feat: uint = levelFeat(level, mode);
         local feat2: uint = levelFeat2(level, mode);
         local bb: int = (level == 5 && mode == 1) ? 19 : 18;
+        # video; a plain image 65536*k wide is not (its low 16 bits are no width)
+        if (mode == 2 && (width >> 16) != 0 && (width & 65535) != 0 && level >= 2) {
+            feat2 = feat2 | cast<uint>(256);
+        }
         if (mode == 1 && e8e9Detect(data, L)) {
             e8e9(data, L, true);
             feat = feat | cast<uint>(64);
@@ -2006,6 +2251,10 @@ frame fm4Decode(f: *u8, n: long) ret long {
         }
         DB = cast<*u8>(malloc(L + 1));
         DB_CAP = L + 1;
+    }
+    # audio files have 1-8 channels; anything else is not a file an encoder wrote
+    if (mode == 3 && (width < 1 || width > 8)) {
+        return -1;
     }
     if (mode == 0) {
         memcpy(cast<*void>(DB), cast<*void>(ptrAdd(f, HDR)), L);
@@ -2065,7 +2314,8 @@ frame fm4InputBuffer(n: long) ret *u8 {
 frame fm4Estimate(L: long, mode: int) ret long {
     local bb: int = (mode == 2) ? 18 : 19;
     local total: long = 1048576 + 4096 * 4 + 256 * 4 + 33 * 4;
-    local ar: long = arenaSize(mode, bb, levelFeat(5, mode), levelFeat2(5, mode), L);
+    # worst case: video bit set, 8 audio channels
+    local ar: long = arenaSize(mode, bb, levelFeat(5, mode), levelFeat2(5, mode) | cast<uint>((mode == 2) ? 256 : 0), L, 8);
     if (ar > AR_CAP) {
         total = total + ar + 64;
     }

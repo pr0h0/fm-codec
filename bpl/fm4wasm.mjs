@@ -1,6 +1,7 @@
 // Browser/Node/Bun host for the BPL-compiled fm4.wasm (same API shape as fm3wasm.mjs).
 //   const fm4 = await loadFm4Wasm(wasmBytesOrResponse);
 //   fm4.encode(Uint8Array, { level, mode: 'bytes' | 'image', width }) -> Uint8Array
+//   fm4.encode(pcm16le, { level, mode: 'audio', channels }), fm4.encode(rgbFrames, { level, mode: 'video', width, height })
 //   fm4.decode(Uint8Array) -> Uint8Array
 export async function loadFm4Wasm(source) {
   const { instance } = source instanceof Response
@@ -26,15 +27,25 @@ export async function loadFm4Wasm(source) {
   const copyOut = (n) => new Uint8Array(mem.buffer, x.fm4Result() >>> 0, n).slice();
 
   return {
-    encode(data, { level = 3, mode = "bytes", width = 0 } = {}) {
-      const m = mode === "image" ? 2 : 1;
+    encode(data, { level = 3, mode = "bytes", width = 0, height = 0, channels = 1 } = {}) {
+      const m = mode === "image" || mode === "video" ? 2 : mode === "audio" ? 3 : 1;
+      let w = width;
+      if (m === 2 && (!(width > 0) || data.length % (3 * width))) throw new Error("bad width");
+      if (mode === "video") {
+        if (width > 65535 || !(height > 0) || height > 65535 || data.length % (3 * width * height)) throw new Error("video: bad frame size");
+        w = width + height * 65536;
+      }
+      if (m === 3) {
+        if (!(channels >= 1 && channels <= 8) || data.length % (2 * channels)) throw new Error("audio: need 1-8 channels and a whole number of 16-bit frames");
+        w = channels;
+      }
       const p = copyIn(data, m);
-      const n = Number(x.fm4Encode(level, m, BigInt(width), p, BigInt(data.length)));
+      const n = Number(x.fm4Encode(level, m, BigInt(w), p, BigInt(data.length)));
       return copyOut(n);
     },
     decode(buf) {
       const L = buf.length >= 28 ? new DataView(buf.buffer, buf.byteOffset).getUint32(16, true) : 0;
-      const m = buf[4] === 2 ? 2 : 1;
+      const m = buf[4];
       ensure(Math.max(L, buf.length), m);
       const p = x.fm4InputBuffer(BigInt(buf.length)) >>> 0;
       new Uint8Array(mem.buffer, p, buf.length).set(buf);

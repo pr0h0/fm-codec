@@ -725,7 +725,7 @@ static uint8_t *fm4_encode(int level, int mode, int64_t width, uint8_t *data, in
     static const uint32_t AL[6] = {0, 0, 32, 32 | 256, 32 | 256 | 2048, 32 | 256 | 2048}, AL2[6] = {0, 0, 0, 2, 2 | 32, 2 | 32};
     uint32_t feat = mode == 2 ? IL[level] : mode == 3 ? AL[level] : BL[level], feat2 = mode == 2 ? IL2[level] : mode == 3 ? AL2[level] : BL2[level];
     int bb = level == 5 && mode == 1 ? 19 : 18, limit = 255;
-    if (mode == 2 && (width >> 16) && level >= 2) feat2 |= 256;   /* video */
+    if (mode == 2 && (width >> 16) && (width & 0xFFFF) && level >= 2) feat2 |= 256;   /* video (a plain image 65536*k wide is not: run() would divide by width 0) */
     if (getenv("FEAT")) feat = (uint32_t)atoi(getenv("FEAT"));
     if (getenv("FEAT2")) feat2 = (uint32_t)atoi(getenv("FEAT2"));
     if (getenv("BB")) bb = atoi(getenv("BB"));
@@ -755,6 +755,7 @@ static uint8_t *fm4_decode(uint8_t *f, int64_t n, int64_t *outLen) {
     if (n < HDR || memcmp(f, "FM4\x01", 4)) return NULL;
     int mode = f[4], bb = f[5], limit = f[6]; uint32_t feat = get32(f + 8), feat2 = get32(f + 24);
     int64_t width = get32(f + 12), L = (int64_t)get32(f + 16) | (int64_t)get32(f + 20) << 32;
+    if (mode > 3 || (mode == 2 && !(width & 0xFFFF)) || (mode == 3 && (width < 1 || width > 8))) return NULL;   /* corrupt header */
     uint8_t *data = malloc(L ? L : 1);
     if (mode == 0) memcpy(data, f + HDR, L);
     else {
@@ -788,7 +789,7 @@ int main(int argc, char **argv) {
         if (level < 0 || level > 5 || (mode >= 2 && argc < 7 + video)) goto usage;
         if (getenv("LR")) LR = atoi(getenv("LR"));
         uint8_t *data = slurp(argv[(mode >= 2 ? 5 : 4) + video], &L);
-        if (mode == 2 && (width <= 0 || L % (3 * width))) { fprintf(stderr, "bad width\n"); return 1; }
+        if (mode == 2 && (width <= 0 || width > 65535 || L % (3 * width))) { fprintf(stderr, "bad width\n"); return 1; }
         if (video && (width > 65535 || fheight <= 0 || fheight > 65535 || L % (3 * width * fheight))) { fprintf(stderr, "video: bad frame size\n"); return 1; }
         if (video) width |= fheight << 16;
         if (mode == 3 && (width <= 0 || width > 8 || L % (2 * width))) { fprintf(stderr, "audio: need 1-8 channels and a whole number of 16-bit frames\n"); return 1; }
