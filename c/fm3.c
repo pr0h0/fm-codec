@@ -134,8 +134,12 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, int64_t wi
     int fapm2 = !img && (feat & 8), fhi = !img && (feat & 16), fmix2 = (feat & 32) != 0;
     int fsparse = !img && (feat & 128), fmix3 = fmix2 && (feat & 256);
     int fimgx = img && (feat & 512), fbias = img && (feat & 1024);
+    int find = !img && (feat & 32768), fmapm = !img && fmatch && fmix2 && (feat & 65536);
+    uint16_t *IND1 = find ? calloc(65536, 2) : NULL, *IND2 = find ? calloc(1 << 22, 2) : NULL;
+    uint16_t *A3 = fmapm ? malloc(sizeof(uint16_t) * 65536 * 33) : NULL;
+    if (fmapm) for (int k = 0; k < 65536; k++) for (int j = 0; j < 33; j++) A3[k * 33 + j] = squash((j - 16) * 128) * 16;
     int32_t BS[2187 * 2] = {0};   /* per gradient-context error sum / count (bias cancellation) */
-    int nctx = img ? 12 + (fimgx ? 4 : 0) : 6 + (fword ? 2 : 0) + (fhi ? 2 : 0) + (fsparse ? 3 : 0);
+    int nctx = img ? 12 + (fimgx ? 4 : 0) : 6 + (fword ? 2 : 0) + (fhi ? 2 : 0) + (fsparse ? 3 : 0) + (find ? 2 : 0);
     int fhist = (feat & 2048) != 0;
     int nin = nctx * (fhist ? 2 : 1) + (fmatch ? 1 : 0) + 1;       /* (+ history inputs) + match + bias */
     /* bit-history state maps: per input, 256 history patterns -> P(1) (16-bit) + count */
@@ -201,6 +205,12 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, int64_t wi
                 ctx[b] = H(40, (c4 >> 8) & 0xFF, 0, 0);          /* byte i-2 alone */
                 ctx[b + 1] = H(41, (c4 >> 16) & 0xFFFF, 0, 0);   /* bytes i-3,i-4 */
                 ctx[b + 2] = H(42, (uint32_t)(i & 3), c4 & 0xFF, 0); /* 4-byte alignment + last byte */
+            }
+            if (find) {   /* indirect: what followed this order-1 / order-2 context the last two times */
+                int b = 6 + (fhi ? 2 : 0) + (fword ? 2 : 0) + (fsparse ? 3 : 0);
+                uint32_t h2 = H(52, c4 & 0xFFFF, 0, 0) >> 10;
+                ctx[b] = H(50, c4 & 0xFF, IND1[c4 & 0xFFFF & 0xFF] | 0, 0);
+                ctx[b + 1] = H(51, c4 & 0xFFFF, IND2[h2], 0);
             }
             if (fmatch) {
                 if (mlen > 0) { if (data[mptr] == data[i - 1]) { mlen++; mptr++; } else mlen = 0; }
@@ -358,7 +368,7 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, int64_t wi
                 d = (int)(df >> 16);
                 pf = clampp(squash(d));
             }
-            int p12 = squash(d), ai1 = 0, aw1 = 0, ai2 = 0, aw2 = 0;
+            int p12 = squash(d), ai1 = 0, aw1 = 0, ai2 = 0, aw2 = 0, ai3 = 0, aw3 = 0, a3used = 0;
             if (fmix2) {
                 int a = img ? (((int)c0 * 16 + act) * 3 + ch) : (int)(c0 | (c4 & 255) << 8);
                 int pa = apm_p(A1, a, d, &ai1, &aw1);
@@ -367,6 +377,13 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, int64_t wi
                     int pb = apm_p(A2, a2, d, &ai2, &aw2);
                     p12 = (2 * p12 + 3 * pa + 3 * pb) >> 3;
                 } else p12 = (p12 + 3 * pa) >> 2;
+                if (fmapm) {
+                    int mvalid = mb >= 0 && !mmiss;
+                    int a3 = mvalid ? ((((mb + 256) >> (7 - bp)) & 255) | (lenq > 15 ? 15 : lenq) << 8 | 1 << 12) : (int)c0;
+                    int pm = apm_p(A3, a3 & 0xFFFF, d, &ai3, &aw3);
+                    p12 = mvalid ? (p12 + pm) >> 1 : p12;
+                    a3used = mvalid;
+                }
             }
             p12 = clampp(p12);
             int bit = code_bit(c, p12, (sym >> (7 - bp)) & 1);
@@ -376,6 +393,7 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, int64_t wi
                 if (fmix3) { upd_w(w3, st, nin, (bit << 12) - p3); upd_w(wf, dd, 3, (bit << 12) - pf); }
                 apm_upd(A1, ai1, aw1, bit);
                 if (fapm2) apm_upd(A2, ai2, aw2, bit);
+                if (a3used) apm_upd(A3, ai3, aw3, bit);
             }
             for (int k = 0; k < nctx; k++) {
                 uint32_t e = bk[k][node], p = e & 0xFFFF, cnt = (e >> 16) & 255, hb = e >> 24;
@@ -404,6 +422,11 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, int64_t wi
         int v = c0 & 255;
         if (!img) {
             if (c->dec) data[i] = v;
+            if (find) {
+                IND1[c4 & 0xFF] = (uint16_t)(IND1[c4 & 0xFF] << 8 | data[i]);
+                uint32_t h2 = H(52, c4 & 0xFFFF, 0, 0) >> 10;
+                IND2[h2] = (uint16_t)(IND2[h2] << 8 | data[i]);
+            }
             c8 = (c8 << 8) | (c4 >> 24); c4 = (c4 << 8) | data[i];
             if (fword) {
                 int ch2 = data[i];
@@ -422,7 +445,7 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, int64_t wi
         }
     }
     for (int k = 0; k < nctx; k++) free(T[k]);
-    free(W1); free(W2); free(W3); free(WF); free(SM); free(A1); free(A2); free(MT); free(err); free(perr);
+    free(W1); free(W2); free(W3); free(WF); free(SM); free(IND1); free(IND2); free(A3); free(A1); free(A2); free(MT); free(err); free(perr);
 }
 
 static int e8e9_detect(const uint8_t *d, int64_t n) {
