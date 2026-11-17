@@ -1,11 +1,9 @@
-# build outputs
-c/fm
-c/fm2
-c/fm3
-c/fmx
-bpl/fm
-bpl/fm2
-bpl/fm3
+# build outputs: every file in c/ and bpl/ that has no source extension is a binary
+c/*
+!c/*.c
+bpl/*
+!bpl/*.bpl
+!bpl/*.mjs
 *.wasm
 *.ll
 *.o
