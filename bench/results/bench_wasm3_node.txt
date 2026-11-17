@@ -1,0 +1,14 @@
+runtime: node v24.20.0
+data        lvl   ratio   js_enc  js_dec  wasm_enc wasm_dec   MB/s js / wasm (enc)   check
+text_1mb    L1  0.1708    1.07    1.12      1.62     1.05     0.93 / 0.62          identical+roundtrip
+text_1mb    L3  0.1458    5.32    5.64      5.76     5.61     0.19 / 0.17          identical+roundtrip
+text_1mb    L4  0.1349   10.14    9.91     12.49    12.33     0.10 / 0.08          identical+roundtrip
+noah        L1  0.2338    0.63    0.52      0.43     0.41     0.47 / 0.69          identical+roundtrip
+noah        L3  0.2060    1.30    1.16      1.09     1.11     0.23 / 0.27          identical+roundtrip
+noah        L4  0.2052    1.78    1.73      1.92     1.82     0.17 / 0.15          identical+roundtrip
+library     L1  0.5466    0.72    0.66      0.66     0.61     0.62 / 0.67          identical+roundtrip
+library     L3  0.4969    1.74    1.79      1.78     1.77     0.25 / 0.25          identical+roundtrip
+library     L4  0.4941    2.83    2.80      2.97     3.07     0.16 / 0.15          identical+roundtrip
+A_original  L1  0.3895   10.02   10.32      9.98    10.00     0.71 / 0.71          identical+roundtrip
+A_original  L3  0.3430   26.88   27.09     27.05    27.59     0.26 / 0.26          identical+roundtrip
+A_original  L4  0.3406   38.03   35.48     47.06    46.97     0.19 / 0.15          identical+roundtrip

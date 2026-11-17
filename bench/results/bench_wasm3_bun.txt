@@ -1,0 +1,14 @@
+runtime: bun 1.4.0
+data        lvl   ratio   js_enc  js_dec  wasm_enc wasm_dec   MB/s js / wasm (enc)   check
+text_1mb    L1  0.1708    1.28    1.33      1.77     1.11     0.78 / 0.56          identical+roundtrip
+text_1mb    L3  0.1458   21.40   18.92      5.94     5.70     0.05 / 0.17          identical+roundtrip
+text_1mb    L4  0.1349   56.44   55.80     13.33    13.38     0.02 / 0.08          identical+roundtrip
+noah        L1  0.2338    2.62    2.51      0.44     0.42     0.11 / 0.67          identical+roundtrip
+noah        L3  0.2060    5.71    1.30      1.18     1.23     0.05 / 0.25          identical+roundtrip
+noah        L4  0.2052    9.01    9.06      2.06     2.07     0.03 / 0.14          identical+roundtrip
+library     L1  0.5466    0.93    0.88      0.67     0.63     0.47 / 0.66          identical+roundtrip
+library     L3  0.4969    1.54    1.51      1.96     2.00     0.29 / 0.23          identical+roundtrip
+library     L4  0.4941    2.21    2.19      3.27     3.33     0.20 / 0.14          identical+roundtrip
+A_original  L1  0.3895    9.02    9.21     10.34    10.32     0.78 / 0.68          identical+roundtrip
+A_original  L3  0.3430   21.88   22.03     30.10    30.20     0.32 / 0.24          identical+roundtrip
+A_original  L4  0.3406   32.05   32.06     51.52    51.39     0.22 / 0.14          identical+roundtrip

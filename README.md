@@ -27,7 +27,10 @@ with neighbour-error contexts. It is lossless.
 
 | Path | What |
 |---|---|
-| `c/fm3.c` | current format (FM3, levels 0–5), C reference; BPL/JS ports pending |
+| `c/fm3.c` | current format (FM3, levels 0–5): C reference and spec |
+| `bpl/fm3_core.bpl`, `bpl/fm3_cli.bpl`, `bpl/fm3_wasm.bpl` | FM3 in BPL: shared core, native CLI, WebAssembly entry |
+| `bpl/fm3wasm.mjs` | JS host for `bpl/fm3.wasm` (browser / Node / Bun), same API as `js/fm3core.mjs` |
+| `js/fm3core.mjs`, `js/fm3.mjs` | FM3 pure JS port (browser-safe core + CLI) |
 | `c/fm2.c` | reference implementation and spec of FM2 (levels 0–5) |
 | `bpl/fm2_core.bpl` | [BPL](https://github.com/pr0h0/bpl3) core, shared by native CLI and WebAssembly |
 | `bpl/fm2_cli.bpl`, `bpl/fm2_wasm.bpl` | native CLI entry and wasm entry |
@@ -40,7 +43,7 @@ with neighbour-error contexts. It is lossless.
 ```bash
 make c                      # C reference (fm3, fm2, ...)
 c/fm3 enc 4 bytes in.txt out.fm3          # fm3, level 0..5
-make bpl wasm BPL=~/Projects/bpl3/bpl
+make bpl wasm bpl3 wasm3 BPL=~/Projects/bpl3/bpl
 c/fm2 enc 4 bytes in.txt out.fm2          # level 0..5
 c/fm2 enc 4 image 2048 in.rgb out.fm2     # raw RGB24, width 2048
 c/fm2 dec out.fm2 restored
@@ -84,6 +87,14 @@ Incompressible input falls back to store. x86 code is detected and E8/E9-transfo
 | 7 MB photo-like image (raw RGB) | 0.390 | 0.347 | **0.341** | 0.341 | 0.349 | 0.665 | 0.651 | 0.501 | 0.347 |
 | 0.4 MB busy illustration | 0.547 | 0.501 | 0.494 | **0.493** | 0.4995 | 0.647 | 0.672 | 0.571 | 0.501 |
 | 0.3 MB character image | 0.234 | 0.208 | **0.205** | 0.205 | 0.209 | 0.315 | 0.281 | 0.237 | 0.212 |
+
+All FM3 implementations (C, BPL native, BPL→wasm, JS) produce byte-identical files.
+
+Speed by implementation (text 10 MB / 7 MB image, level 4, encode): C 26 s / 11 s, BPL native
+(`--march native`) 31–34 s / 14 s (BPL keeps bounds/null/stack checks it cannot turn off, which cost
+15–25% once the code is compute-bound). In the browser (Chromium 156) BPL→wasm and the JS port run at
+about the same speed (JS ~25% faster on the large image at L4); in Bun the wasm build avoids JS JIT
+stalls. Raw numbers: `bench/results/fm3_c_vs_bpl.txt`, `bench_wasm3_*.txt`, `bench_browser3_chromium.txt`.
 
 Speed (C, single thread, i7-6700, MB/s encode; decode is the same):
 L1 2.2 (text) / 1.9 (image), L2 1.0 / 1.0, L3 0.6 / 0.8, L4 0.36 / 0.6. Peak memory: L1 12–67 MB,

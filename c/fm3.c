@@ -487,6 +487,7 @@ static uint32_t get32(const uint8_t *p) { return p[0] | p[1] << 8 | p[2] << 16 |
 static void header(uint8_t *h, int mode, int bb, int limit, int lr, uint32_t feat, int64_t width, int64_t L) {
     memcpy(h, "FM3\x01", 4); h[4] = mode; h[5] = bb; h[6] = limit; h[7] = lr;
     put32(h + 8, feat); put32(h + 12, (uint32_t)width); put32(h + 16, (uint32_t)L); put32(h + 20, (uint32_t)((uint64_t)L >> 32));
+    put32(h + 24, 0);   /* reserved */
 }
 static uint8_t *encode_one(int mode, int bb, int limit, uint32_t feat, int64_t width, uint8_t *data, int64_t L, int64_t *outLen) {
     Coder c = {0, 0xFFFFFFFFu, 0, NULL, 0, 0, 0, 0};
