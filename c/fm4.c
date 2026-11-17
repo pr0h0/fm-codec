@@ -169,6 +169,8 @@ static void ols_upd(Ols *o, double y) {
 }
 static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, uint32_t feat2, int64_t width, uint8_t *data, int64_t L) {
     int img = mode == 2, aud = mode == 3, nchan = aud ? (int)width : 0;
+    /* video = image mode with feat2 bit 256: width field = width | frame height << 16 */
+    int fvid = img && (feat2 & 256); int64_t fh = fvid ? width >> 16 : 0; if (fvid) width &= 0xFFFF;
     int XORD = !img && (feat2 & 1), XM4 = (feat & 256) && (feat2 & 2), XTXT = !img && (feat2 & 4), XRUN = !img && (feat2 & 8);
     int XOLS = img && (feat2 & 16), XWIDE = XOLS && (feat2 & 32), XCOL = img && (feat2 & 64), XIM = img && (feat2 & 128);
     int flite = (feat & (1u << 21)) != 0;
@@ -183,14 +185,14 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, uint32_t f
     int nord = flite ? 3 : 6 + (fhi ? 2 : 0);
     int bword = nord, bsparse = bword + (fword ? 2 : 0), bind = bsparse + (fsparse ? 3 : 0), bcol = bind + (find ? 2 : 0);
     int btxt = bcol + (fcol ? 2 : 0), ntxt = XTXT ? 4 : 0;
-    int nctx = img ? (flite ? 6 : 12 + (fimgx ? 4 : 0) + (XOLS ? 2 : 0) + (XCOL ? 2 : 0) + (XIM ? 1 : 0)) : btxt + ntxt;
+    int nctx = img ? (flite ? 6 : 12 + (fimgx ? 4 : 0) + (XOLS ? 2 : 0) + (XCOL ? 2 : 0) + (XIM ? 1 : 0) + (fvid ? 3 : 0)) : btxt + ntxt;
     if (aud) nctx = 10;
     int nimm = XIM ? 1 : 0;
     int nrun = XRUN ? nctx : 0;
     int nin = nctx * (fhist ? 2 : 1) + nrun + nimm + (fmatch ? 1 : 0) + (fm2nd ? 1 : 0) + 1;   /* + match(es) + bias */
-    int np = img && !flite ? 9 + (XOLS ? 1 : 0) : 0;
+    int np = img && !flite ? 9 + (XOLS ? 1 : 0) + (fvid ? 2 : 0) : 0;
     Ols *OL = calloc(3, sizeof(Ols)); OL[0].n = 10; OL[1].n = 14; OL[2].n = 15; if (XWIDE) for (int k = 0; k < 3; k++) OL[k].n += 10; int oin = 0;
-    for (int k = 0; k < 3; k++) OL[k].lam = OLAM;
+    for (int k = 0; k < 3; k++) { OL[k].lam = OLAM; if (fvid) OL[k].n += 4; }
 
     /* table size per context: low-cardinality contexts get small, cache-resident tables */
     static const int TB_IMG[16] = {8, 12, 12, 12, 16, 16, 0, 17, 0, 0, 0, 0, 17, 16, 16, 0};
@@ -370,6 +372,8 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, uint32_t f
             int NNv = hasNN ? data[iN - stride] : Nv;
             int mx = Wv > Nv ? Wv : Nv, mn = Wv < Nv ? Wv : Nv;
             pr[0] = NWv >= mx ? mn : (NWv <= mn ? mx : Wv + Nv - NWv);   /* MED */
+            int64_t fb = stride * fh; int hasP = fvid && i >= fb;
+            int Pv = hasP ? data[i - fb] : 0, PWv = hasP && hasW ? data[i - fb - 3] : Pv, PNv = hasP && i - fb - stride >= 0 ? data[i - fb - stride] : Pv;
             pred = pr[0];
             if (np) {
                 pr[1] = clamp255(Wv + Nv - NWv);
@@ -394,8 +398,9 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, uint32_t f
                         X[5] = data[i - s2]; X[6] = data[i - s2 + 3]; X[7] = data[iN - 6]; X[8] = data[iN + 6]; X[9] = data[i - s2 - 3];
                         if (ch >= 1) { X[10] = data[i - 1]; X[11] = data[iW - 1]; X[12] = data[iN - 1]; X[13] = data[iNW - 1]; }
                         if (ch == 2) X[14] = data[i - 2];
+                        if (fvid) { int b = OL[ch].n - 4; X[b] = Pv; X[b + 1] = PWv; X[b + 2] = PNv; X[b + 3] = hasP ? data[i - fb + 3] : 0; }
                         if (XWIDE) {   /* wider: 6 more same-channel, 4 more cross-channel */
-                            int b = OL[ch].n - 10;
+                            int b = OL[ch].n - 10 - (fvid ? 4 : 0);
                             X[b] = data[i - 9]; X[b + 1] = data[iN - 9 < 0 ? iN : iN - 9]; X[b + 2] = data[iN + 9 >= i ? iN : iN + 9];
                             X[b + 3] = data[i - s2 - 6]; X[b + 4] = data[i - s2 + 6 >= i ? i - s2 : i - s2 + 6]; X[b + 5] = data[i - 3 * stride >= 0 ? i - 3 * stride : i - s2];
                             int c2 = ch ? 1 : 0;
@@ -405,6 +410,10 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, uint32_t f
                         double v = floor(ols_pred(&OL[ch]) + 0.5);
                         pr[9] = v < 0 ? 0 : v > 255 ? 255 : (int)v;
                     }
+                }
+                if (fvid) {   /* previous frame: same pixel, and same pixel + spatial change since then */
+                    pr[np - 2] = hasP ? Pv : pr[0];
+                    pr[np - 1] = hasP ? clamp255(Pv + Wv - PWv) : pr[0];
                 }
                 int64_t num = 0, den = 0;
                 for (int k = 0; k < np; k++) {
@@ -454,6 +463,11 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, uint32_t f
                 int j = 12 + (fimgx ? 4 : 0) + (XOLS ? 2 : 0);
                 if (XCOL) ctx[j++] = H(28, chv, (uint32_t)(Wv | Nv << 8 | NWv << 16), (uint32_t)NEv);
                 if (XCOL) ctx[j++] = H(29, chv, (uint32_t)((ch ? data[i - 1] : 0) | (ch == 2 ? data[i - 2] : 0) << 8 | Wv << 16), (uint32_t)(ch ? (i > 3 ? data[iW - 1] : 0) - data[i - 1] + 256 : 0) * 256 + (uint32_t)Nv);
+                if (fvid) {
+                    ctx[j++] = H(31, chv, hasP ? qe(Pv - pred, 40) : 999u, 0);
+                    ctx[j++] = H(32, chv, hasP ? (uint32_t)Pv : 999u, qe(pr[0] - pred, 10));
+                    ctx[j++] = H(33, chv, hasP ? qe(Pv - pred, 10) * 256 + qe(PWv - Wv, 10) : 99999u, qe(PNv - Nv, 10));
+                }
                 if (XIM) {   /* 2-D match: pixel seen after the same 4 neighbour pixels */
                     if (ch == 0) {
                         if (imlen > 0 && imok) { imptr++; if (imlen < 65535) imlen++; } else imlen = 0;
@@ -711,6 +725,7 @@ static uint8_t *fm4_encode(int level, int mode, int64_t width, uint8_t *data, in
     static const uint32_t AL[6] = {0, 0, 32, 32 | 256, 32 | 256 | 2048, 32 | 256 | 2048}, AL2[6] = {0, 0, 0, 2, 2 | 32, 2 | 32};
     uint32_t feat = mode == 2 ? IL[level] : mode == 3 ? AL[level] : BL[level], feat2 = mode == 2 ? IL2[level] : mode == 3 ? AL2[level] : BL2[level];
     int bb = level == 5 && mode == 1 ? 19 : 18, limit = 255;
+    if (mode == 2 && (width >> 16) && level >= 2) feat2 |= 256;   /* video */
     if (getenv("FEAT")) feat = (uint32_t)atoi(getenv("FEAT"));
     if (getenv("FEAT2")) feat2 = (uint32_t)atoi(getenv("FEAT2"));
     if (getenv("BB")) bb = atoi(getenv("BB"));
@@ -768,15 +783,17 @@ int main(int argc, char **argv) {
     init_tables();
     if (getenv("HUGE")) OPT_HUGE = atoi(getenv("HUGE"));
     if (argc >= 6 && !strcmp(argv[1], "enc")) {
-        int level = atoi(argv[2]), mode = !strcmp(argv[3], "image") ? 2 : !strcmp(argv[3], "audio") ? 3 : 1;
-        int64_t width = mode >= 2 ? atoll(argv[4]) : 0, L, n;
-        if (level < 0 || level > 5 || (mode >= 2 && argc < 7)) goto usage;
+        int level = atoi(argv[2]), video = !strcmp(argv[3], "video"), mode = !strcmp(argv[3], "image") || video ? 2 : !strcmp(argv[3], "audio") ? 3 : 1;
+        int64_t width = mode >= 2 ? atoll(argv[4]) : 0, fheight = video ? atoll(argv[5]) : 0, L, n;
+        if (level < 0 || level > 5 || (mode >= 2 && argc < 7 + video)) goto usage;
         if (getenv("LR")) LR = atoi(getenv("LR"));
-        uint8_t *data = slurp(argv[mode >= 2 ? 5 : 4], &L);
+        uint8_t *data = slurp(argv[(mode >= 2 ? 5 : 4) + video], &L);
         if (mode == 2 && (width <= 0 || L % (3 * width))) { fprintf(stderr, "bad width\n"); return 1; }
+        if (video && (width > 65535 || fheight <= 0 || fheight > 65535 || L % (3 * width * fheight))) { fprintf(stderr, "video: bad frame size\n"); return 1; }
+        if (video) width |= fheight << 16;
         if (mode == 3 && (width <= 0 || width > 8 || L % (2 * width))) { fprintf(stderr, "audio: need 1-8 channels and a whole number of 16-bit frames\n"); return 1; }
         uint8_t *o = fm4_encode(level, mode, width, data, L, &n);
-        return spit(argv[mode >= 2 ? 6 : 5], o, n);
+        return spit(argv[(mode >= 2 ? 6 : 5) + video], o, n);
     }
     if (argc == 4 && !strcmp(argv[1], "dec")) {
         int64_t n, L; uint8_t *f = slurp(argv[2], &n);

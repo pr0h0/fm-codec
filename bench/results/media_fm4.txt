@@ -1,0 +1,24 @@
+VIDEO: 10 frames 640x360 RGB24 from 5 clips, compressed/raw (fm4 level 4, 2026-11-18)
+clip   fm4-video  fm4-stacked    xz-9e     ffv1  x264rgb      png
+v0     0.0055       0.0057   0.0071   0.0620   0.0091   0.0859   (screen recording / render)
+v1     0.0034       0.0043   0.0049   0.0360   0.0103   0.0520   (slides)
+v2     0.0532       0.0745   0.0942   0.1182   0.1376   0.2183   (animated background)
+v3     0.0110       0.0161   0.0204   0.0471   0.0224   0.0618   (stick-figure animation)
+v4     0.2066       0.2087   0.3115   0.2408   0.3137   0.4496   (camera footage)
+fm4-video = fm4 enc 4 video 640 360; fm4-stacked = image mode on frames stacked vertically; ~25 s per clip (0.27 MB/s)
+
+AUDIO: 20 s clips, 16-bit PCM, compressed/raw (fm4 enc 4 audio CH vs flac -8); all round-trip
+clip                    fm4-aud   flac-8  vs-flac
+a0 music 24k mono        0.097    0.175   -44.8%
+a1 speech 24k mono       0.530    0.573    -7.4%
+a2 speech 24k mono       0.513    0.553    -7.3%
+a3 speech 24k mono       0.525    0.601   -12.6%
+a4 speech 24k mono       0.483    0.559   -13.6%
+a5 speech 24k mono       0.433    0.513   -15.6%
+a6 speech 24k mono       0.462    0.518   -10.7%
+a7 speech 24k mono       0.503    0.582   -13.7%
+a8 recording 48k stereo  0.108    0.137   -20.7%
+a9 sax 48k mono          0.383    0.407    -6.0%
+a10 speech (from mp3)    0.364    0.418   -13.0%
+a11 speech (from mp3)    0.333    0.386   -13.6%
+bytes mode on the same clips (no audio model): 0.26-0.66, i.e. 5-60% larger than FLAC
