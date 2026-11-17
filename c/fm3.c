@@ -14,7 +14,7 @@
 #include <string.h>
 #include <sys/mman.h>
 
-#define MAXIN 36
+#define MAXIN 48
 #define NPRED 9
 #define HDR 28
 
@@ -135,13 +135,18 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, int64_t wi
     int fsparse = !img && (feat & 128), fmix3 = fmix2 && (feat & 256);
     int fimgx = img && (feat & 512), fbias = img && (feat & 1024);
     int find = !img && (feat & 32768), fmapm = !img && fmatch && fmix2 && (feat & 65536);
+    int fm2nd = !img && fmatch && (feat & 131072), fcol = !img && (feat & 262144);
+    uint32_t *MT2 = fm2nd ? calloc((size_t)1 << MBITS, 4) : NULL;
+    int64_t mptr2 = 0, mlen2 = 0, linestart = 0, prevline = 0;
+    uint32_t w2 = 0;
+    uint16_t MP2[64]; uint8_t MN2[64] = {0}; for (int j = 0; j < 64; j++) MP2[j] = 49152;
     uint16_t *IND1 = find ? calloc(65536, 2) : NULL, *IND2 = find ? calloc(1 << 22, 2) : NULL;
     uint16_t *A3 = fmapm ? malloc(sizeof(uint16_t) * 65536 * 33) : NULL;
     if (fmapm) for (int k = 0; k < 65536; k++) for (int j = 0; j < 33; j++) A3[k * 33 + j] = squash((j - 16) * 128) * 16;
     int32_t BS[2187 * 2] = {0};   /* per gradient-context error sum / count (bias cancellation) */
-    int nctx = img ? 12 + (fimgx ? 4 : 0) : 6 + (fword ? 2 : 0) + (fhi ? 2 : 0) + (fsparse ? 3 : 0) + (find ? 2 : 0);
+    int nctx = img ? 12 + (fimgx ? 4 : 0) : 6 + (fword ? 2 : 0) + (fhi ? 2 : 0) + (fsparse ? 3 : 0) + (find ? 2 : 0) + (fcol ? 2 : 0);
     int fhist = (feat & 2048) != 0;
-    int nin = nctx * (fhist ? 2 : 1) + (fmatch ? 1 : 0) + 1;       /* (+ history inputs) + match + bias */
+    int nin = nctx * (fhist ? 2 : 1) + (fmatch ? 1 : 0) + (fm2nd ? 1 : 0) + 1;  /* (+ history) + match(es) + bias */
     /* bit-history state maps: per input, 256 history patterns -> P(1) (16-bit) + count */
     int fhbp = fhist && (feat & 4096);   /* history maps also keyed by bit position */
     uint32_t *SM = malloc(sizeof(uint32_t) * MAXIN * 2048);   /* p16 | count << 16 */
@@ -191,7 +196,7 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, int64_t wi
 
     for (int64_t i = 0; i < L; i++) {
         int ch = 0, act = 0, eP = 0, pred = 0, sym = 0, pr[NPRED], bctx = 0, predRaw = 0;
-        int mb = -1, lenq = 0, msel = 0;
+        int mb = -1, lenq = 0, msel = 0, mb2 = -1, lenq2 = 0, mmiss2 = 0;
         if (!img) {
             for (int k = 0; k < 6 + (fhi ? 2 : 0); k++) {
                 int o = ORD[k];
@@ -212,6 +217,13 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, int64_t wi
                 ctx[b] = H(50, c4 & 0xFF, IND1[c4 & 0xFFFF & 0xFF] | 0, 0);
                 ctx[b + 1] = H(51, c4 & 0xFFFF, IND2[h2], 0);
             }
+            if (fcol) {   /* column: char above in the previous line; word pair */
+                int b = 6 + (fhi ? 2 : 0) + (fword ? 2 : 0) + (fsparse ? 3 : 0) + (find ? 2 : 0);
+                int64_t col = i - linestart, ab = prevline + col;
+                uint32_t above = ab < linestart ? data[ab] : 0;
+                ctx[b] = H(60, above, (uint32_t)(col > 255 ? 255 : col), c4 & 0xFF);
+                ctx[b + 1] = H(61, w0, w1, w2);
+            }
             if (fmatch) {
                 if (mlen > 0) { if (data[mptr] == data[i - 1]) { mlen++; mptr++; } else mlen = 0; }
                 if (i >= 6) {
@@ -226,7 +238,27 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, int64_t wi
                     }
                     MT[h] = (uint32_t)i;
                 }
+                if (fm2nd) {
+                    if (mlen2 > 0) { if (data[mptr2] == data[i - 1]) { mlen2++; mptr2++; } else mlen2 = 0; }
+                    if (i >= 12) {
+                        uint32_t hh = H(98, c4, c8, (uint32_t)data[i - 9] | (uint32_t)data[i - 10] << 8 | (uint32_t)data[i - 11] << 16 | (uint32_t)data[i - 12] << 24) >> (32 - MBITS);
+                        if (mlen2 == 0) {
+                            int64_t cand = MT2[hh];
+                            if (cand > 0 && cand != mptr) {
+                                int64_t len = 0;
+                                while (len < 400 && cand - 1 - len >= 0 && data[cand - 1 - len] == data[i - 1 - len]) len++;
+                                if (len >= 12) { mlen2 = len; mptr2 = cand; }
+                            }
+                        }
+                        MT2[hh] = (uint32_t)i;
+                    }
+                    if (mlen2 > 65535) mlen2 = 65535;
+                }
                 if (mlen > 65535) mlen = 65535;
+                if (fm2nd && mlen2 > 0) {
+                    mb2 = data[mptr2];
+                    lenq2 = mlen2 < 16 ? (int)mlen2 : 16 + (int)((mlen2 - 16) >> 4 > 15 ? 15 : (mlen2 - 16) >> 4);
+                }
                 if (mlen > 0) {
                     mb = data[mptr];
                     lenq = mlen < 16 ? (int)mlen : 16 + (int)((mlen - 16) >> 4 > 15 ? 15 : (mlen - 16) >> 4);
@@ -338,6 +370,15 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, int64_t wi
                     st[n++] = eb ? sp : -sp;
                 } else st[n++] = 0;
             }
+            int eb2 = -1, mq2 = 0;
+            if (fm2nd) {
+                if (mb2 >= 0 && !mmiss2) {
+                    eb2 = (mb2 >> (7 - bp)) & 1;
+                    mq2 = lenq2 * 2 + (bp == 0);
+                    int sp = STRETCH[MP2[mq2] >> 4];
+                    st[n++] = eb2 ? sp : -sp;
+                } else st[n++] = 0;
+            }
             st[n++] = 256;  /* bias */
             int32_t *w1 = W1 + (bp * 16 + sel1) * MAXIN;
             int32_t *w2 = W2 + (img ? ((bp * 3 + ch) * 32 + (ch ? (int)qe(eP, 15) - 49 : 0)) : (int)c0) * MAXIN;
@@ -416,6 +457,12 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, int64_t wi
                 if (cnt < 255) MN[mq] = cnt + 1;
                 if (!ok) mmiss = 1;
             }
+            if (eb2 >= 0) {
+                int ok = bit == eb2, cnt = MN2[mq2];
+                MP2[mq2] += ((((ok << 16) - MP2[mq2]) * RECIP[cnt]) >> 15);
+                if (cnt < 255) MN2[mq2] = cnt + 1;
+                if (!ok) mmiss2 = 1;
+            }
             c0 = c0 * 2 + bit;
             node = node * 2 + bit;
         }
@@ -427,12 +474,13 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, int64_t wi
                 uint32_t h2 = H(52, c4 & 0xFFFF, 0, 0) >> 10;
                 IND2[h2] = (uint16_t)(IND2[h2] << 8 | data[i]);
             }
+            if (data[i] == '\n') { prevline = linestart; linestart = i + 1; }
             c8 = (c8 << 8) | (c4 >> 24); c4 = (c4 << 8) | data[i];
             if (fword) {
                 int ch2 = data[i];
                 int isw = (ch2 >= 'a' && ch2 <= 'z') || (ch2 >= 'A' && ch2 <= 'Z') || (ch2 >= '0' && ch2 <= '9') || ch2 == '_' || ch2 >= 128;
                 if (isw) w0 = (w0 + (uint32_t)(ch2 | 32) + 1) * 0x01000193u;
-                else if (w0) { w1 = w0; w0 = 0; }
+                else if (w0) { w2 = w1; w1 = w0; w0 = 0; }
             }
         } else {
             if (c->dec) { int s = (v & 1) ? -((v + 1) >> 1) : (v >> 1); data[i] = (uint8_t)(pred + s); }
@@ -445,7 +493,7 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, int64_t wi
         }
     }
     for (int k = 0; k < nctx; k++) free(T[k]);
-    free(W1); free(W2); free(W3); free(WF); free(SM); free(IND1); free(IND2); free(A3); free(A1); free(A2); free(MT); free(err); free(perr);
+    free(W1); free(W2); free(W3); free(WF); free(SM); free(IND1); free(IND2); free(A3); free(MT2); free(A1); free(A2); free(MT); free(err); free(perr);
 }
 
 static int e8e9_detect(const uint8_t *d, int64_t n) {
