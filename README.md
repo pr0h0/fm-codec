@@ -74,7 +74,20 @@ c/fm4 enc 4 image 2048 in.rgb out.fm4         # raw RGB24, width
 c/fm4 enc 4 audio 2 in.pcm out.fm4            # raw 16-bit little-endian PCM, channels
 c/fm4 enc 4 video 640 360 in.rgb out.fm4      # raw RGB24 frames, width height
 c/fm4 dec out.fm4 restored
+c/fm4 a 4 out.fma dir file ...                # archive files and directories (C only)
+c/fm4 a -m bytes 4 out.fma dir                # same, without the audio/image models
+c/fm4 x out.fma destdir                       # extract
 ```
+
+**Archives** (`FMA`, format described above `archive()` in `c/fm4.c`): all files are sorted by extension
+and compressed as one stream, so small similar files share context. The PCM data of 16-bit WAV files
+goes through the audio model and the pixels of 24-bit BMP (width a multiple of 4) and PPM files through
+the image model, each as its own stream; `-m bytes` turns that off. Files that look already compressed
+(byte entropy above 7.8 bits: PNG, JPEG, MP4, zip) are stored. Permissions and empty directories are
+kept; symlinks and timestamps are not. A source tree with binaries (80 files, 4.18 MB): level 4
+276,794 bytes in 13.7 s, level 2 411,136 in 3.8 s; `tar | xz -9e` 404,800, `zstd -19` 443,387,
+`zip -9` 935,388. `-m bytes` is not a speed-up at the same level (a WAV at level 4: 1.9 s and 69 KB
+with the audio model, 2.3 s and 167 KB without); use a lower level for speed.
 
 Measured on a corpus built from a source tree (`tools/make_corpus.sh`: 10 text types, 20 images) plus
 the earlier test files, fm4 vs fm3 at level 4: text and code -1.9% mean (level 5: -3.3%), images

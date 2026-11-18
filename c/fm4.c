@@ -35,6 +35,9 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <math.h>
+#include <sys/stat.h>
+#include <dirent.h>
+#include <errno.h>
 
 #define MAXIN 96
 #define NPRED 12
@@ -757,7 +760,8 @@ static uint8_t *fm4_decode(uint8_t *f, int64_t n, int64_t *outLen) {
     int64_t width = get32(f + 12), L = (int64_t)get32(f + 16) | (int64_t)get32(f + 20) << 32;
     if (mode > 3 || (mode == 2 && !(width & 0xFFFF)) || (mode == 3 && (width < 1 || width > 8))) return NULL;   /* corrupt header */
     uint8_t *data = malloc(L ? L : 1);
-    if (mode == 0) memcpy(data, f + HDR, L);
+    if (!data) return NULL;
+    if (mode == 0) { if (L > n - HDR) { free(data); return NULL; } memcpy(data, f + HDR, L); }
     else {
         LR = f[7];
         Coder c = {0, 0xFFFFFFFFu, 0, f + HDR, n - HDR, 0, 0, 1};
@@ -780,9 +784,172 @@ static int spit(const char *path, uint8_t *b, int64_t n) {
     FILE *f = fopen(path, "wb"); if (!f) { perror(path); return 1; }
     fwrite(b, 1, n, f); fclose(f); return 0;
 }
+/* ---- archive: "FMA\x01" | stream* ; stream = u64 length | FM4 stream.
+   Stream 0 (bytes mode) is the index followed by the solid data of every file, files sorted by extension.
+   Index: u32 count | per file: u16 path length | path | u32 permissions | u64 size | u64 a | u64 b.
+   For a file with b > 0, bytes [a, a+b) are not in stream 0 but in a stream of their own (next in file order):
+   PCM of a WAV in audio mode, pixels of a BMP/PPM in image mode, or a file that looks already compressed, stored. ---- */
+typedef struct { char *path; uint8_t *d; int64_t size, a, b, width; int mode, perm; } Ent;
+static Ent *ents; static int nents;
+static void put64(uint8_t *p, uint64_t v) { for (int i = 0; i < 8; i++) p[i] = v >> (8 * i); }
+static int64_t get64(const uint8_t *p) { return (int64_t)get32(p) | (int64_t)get32(p + 4) << 32; }
+static void add_path(const char *path) {
+    struct stat st;
+    if (lstat(path, &st)) { perror(path); exit(1); }
+    if (S_ISDIR(st.st_mode)) {
+        DIR *dir = opendir(path); struct dirent *de; int any = 0;
+        if (!dir) { perror(path); exit(1); }
+        while ((de = readdir(dir))) {
+            if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) continue;
+            char *sub = malloc(strlen(path) + strlen(de->d_name) + 2);
+            sprintf(sub, "%s/%s", path, de->d_name); add_path(sub); free(sub); any = 1;
+        }
+        closedir(dir);
+        if (any) return;
+    }
+    if (S_ISREG(st.st_mode) || S_ISDIR(st.st_mode)) {   /* a file, or an empty directory (stored as a path ending in "/") */
+        const char *name = path;   /* stored name: the path as given, without leading "/", "./", "../" */
+        for (;;) { if (*name == '/') name++; else if (!strncmp(name, "./", 2)) name += 2; else if (!strncmp(name, "../", 3)) name += 3; else break; }
+        if (strlen(name) > 65535) { fprintf(stderr, "%s: path too long\n", path); exit(1); }
+        if (!(nents & (nents + 1))) ents = realloc(ents, (2 * nents + 2) * sizeof(Ent));
+        Ent *e = &ents[nents++]; memset(e, 0, sizeof *e);
+        e->perm = st.st_mode & 0777;
+        if (S_ISDIR(st.st_mode)) { e->path = malloc(strlen(name) + 2); sprintf(e->path, "%s/", name); e->d = malloc(1); }
+        else { e->path = strdup(name); e->d = slurp(path, &e->size); }
+    } else fprintf(stderr, "%s: not a regular file, skipped\n", path);
+}
+static int ent_cmp(const void *x, const void *y) {
+    const Ent *a = x, *b = y;
+    const char *ea = strrchr(a->path, '.'), *eb = strrchr(b->path, '.');
+    int c = strcmp(ea ? ea : "", eb ? eb : "");
+    return c ? c : strcmp(a->path, b->path);
+}
+static int rd16(const uint8_t *p) { return p[0] | p[1] << 8; }
+static void detect(Ent *e, int media) {
+    uint8_t *d = e->d; int64_t n = e->size, a = 0, b = 0, w = 0; int mode = 0;
+    if (media && n >= 44 && !memcmp(d, "RIFF", 4) && !memcmp(d + 8, "WAVE", 4)) {   /* WAV, 16-bit PCM */
+        int ch = 0;
+        for (int64_t p = 12; p + 8 <= n; ) {
+            int64_t len = get32(d + p + 4);
+            if (!memcmp(d + p, "fmt ", 4) && p + 24 <= n && rd16(d + p + 8) == 1 && rd16(d + p + 22) == 16) ch = rd16(d + p + 10);
+            if (!memcmp(d + p, "data", 4)) {
+                if (ch >= 1 && ch <= 8) { a = p + 8; b = len < n - a ? len : n - a; b -= b % (2 * ch); w = ch; mode = 3; }
+                break;
+            }
+            p += 8 + len + (len & 1);
+        }
+    } else if (media && n >= 54 && d[0] == 'B' && d[1] == 'M' && rd16(d + 28) == 24 && !get32(d + 30)) {   /* BMP, 24-bit, rows without padding */
+        w = get32(d + 18); a = get32(d + 10);
+        if (w > 0 && w <= 65535 && w % 4 == 0 && a < n) { b = n - a; b -= b % (3 * w); mode = 2; }
+    } else if (media && n >= 9 && d[0] == 'P' && d[1] == '6') {   /* PPM, 8-bit */
+        char h[32] = {0}; int pw, ph, mv, off = 0;
+        memcpy(h, d, n < 31 ? n : 31);
+        if (sscanf(h, "P6 %d %d %d%n", &pw, &ph, &mv, &off) == 3 && off && mv == 255 && pw > 0 && pw <= 65535 && ph > 0) {
+            w = pw; a = off + 1; b = n - a < 3 * w * ph ? n - a : 3 * w * ph; b -= b % (3 * w); mode = 2;
+        }
+    }
+    if (b < 4096) { a = b = 0; mode = 0; }
+    if (!mode && n >= 1024) {   /* already compressed? (byte entropy above 7.8 bits) -> store, do not spend time on it */
+        int64_t cnt[256] = {0}; double h = 0;
+        for (int64_t i = 0; i < n; i++) cnt[d[i]]++;
+        for (int i = 0; i < 256; i++) if (cnt[i]) h -= (double)cnt[i] / n * log2((double)cnt[i] / n);
+        if (h > 7.8) b = n;
+    }
+    e->a = a; e->b = b; e->mode = mode; e->width = w;
+}
+static int archive(int level, int media, const char *out, char **paths, int np) {
+    for (int i = 0; i < np; i++) add_path(paths[i]);
+    qsort(ents, nents, sizeof(Ent), ent_cmp);
+    int64_t n = 4, total = 0;
+    for (int i = 0; i < nents; i++) { Ent *e = &ents[i]; detect(e, media); n += 30 + strlen(e->path) + e->size - e->b; total += e->size; }
+    uint8_t *s = malloc(n), *p = s;
+    for (int i = 0; i < 4; i++) *p++ = (uint32_t)nents >> (8 * i);
+    for (int i = 0; i < nents; i++) {
+        Ent *e = &ents[i]; int pl = strlen(e->path);
+        *p++ = pl; *p++ = pl >> 8; memcpy(p, e->path, pl); p += pl;
+        for (int k = 0; k < 4; k++) *p++ = (uint32_t)e->perm >> (8 * k);
+        put64(p, e->size); put64(p + 8, e->a); put64(p + 16, e->b); p += 24;
+    }
+    for (int i = 0; i < nents; i++) {
+        Ent *e = &ents[i];
+        memcpy(p, e->d, e->a); p += e->a;
+        memcpy(p, e->d + e->a + e->b, e->size - e->a - e->b); p += e->size - e->a - e->b;
+    }
+    FILE *f = fopen(out, "wb"); if (!f) { perror(out); return 1; }
+    int64_t written = 4; uint8_t l8[8];
+    fwrite("FMA\x01", 1, 4, f);
+    for (int i = -1; i < nents; i++) {
+        Ent *e = i < 0 ? NULL : &ents[i]; int64_t m;
+        if (e && !e->b) continue;
+        uint8_t *o = e ? fm4_encode(e->mode ? level : 0, e->mode, e->width, e->d + e->a, e->b, &m) : fm4_encode(level, 1, 0, s, n, &m);
+        fprintf(stderr, "%-6s %12lld -> %12lld  %s\n", !e ? "solid" : e->mode == 3 ? "audio" : e->mode == 2 ? "image" : "stored",
+                (long long)(e ? e->b : n), (long long)m, e ? e->path : "(index and all other data)");
+        put64(l8, m); fwrite(l8, 1, 8, f); fwrite(o, 1, m, f); free(o); written += 8 + m;
+    }
+    if (fclose(f)) { perror(out); return 1; }
+    fprintf(stderr, "%d files, %lld -> %lld bytes\n", nents, (long long)total, (long long)written);
+    return 0;
+}
+static int bad_path(const char *p) {   /* absolute, empty, or with a ".." component: would write outside the target directory */
+    if (!*p || *p == '/') return 1;
+    for (const char *s = p; s; s = strchr(s, '/'), s = s ? s + 1 : NULL)
+        if (!strncmp(s, "..", 2) && (s[2] == '/' || !s[2])) return 1;
+    return 0;
+}
+static uint8_t *next_stream(uint8_t *f, int64_t n, int64_t *pos, int64_t *L) {
+    if (n - *pos < 8) return NULL;
+    int64_t m = get64(f + *pos);
+    if (m < 0 || m > n - *pos - 8) return NULL;
+    uint8_t *d = fm4_decode(f + *pos + 8, m, L);
+    *pos += 8 + m;
+    return d;
+}
+static int extract(const char *in, const char *dir) {
+    int64_t n, pos = 4, sn; uint8_t *f = slurp(in, &n);
+    if (n < 4 || memcmp(f, "FMA\x01", 4)) { fprintf(stderr, "not an FMA archive\n"); return 1; }
+    uint8_t *s = next_stream(f, n, &pos, &sn);
+    if (!s || sn < 4) goto bad;
+    int64_t count = get32(s), ip = 4, total = 0;
+    for (int64_t i = 0; i < count; i++) {   /* first pass over the index: find where the data starts */
+        if (sn - ip < 2 || sn - ip < 30 + rd16(s + ip)) goto bad;
+        ip += 30 + rd16(s + ip);
+    }
+    uint8_t *q = s + ip; ip = 4;
+    if (mkdir(dir, 0777) && errno != EEXIST) { perror(dir); return 1; }
+    /* ponytail: an existing symlink inside the target directory is followed; extract into a fresh directory if the archive is untrusted */
+    for (int64_t i = 0; i < count; i++) {
+        int pl = rd16(s + ip); char *name = malloc(strlen(dir) + pl + 2), *rel = name + strlen(dir) + 1;
+        sprintf(name, "%s/", dir); memcpy(rel, s + ip + 2, pl); rel[pl] = 0; ip += 2 + pl;
+        int perm = get32(s + ip) & 0777; int64_t size = get64(s + ip + 4), a = get64(s + ip + 12), b = get64(s + ip + 20), bn = 0; ip += 28;
+        if ((int64_t)strlen(rel) != pl || bad_path(rel)) { fprintf(stderr, "unsafe path in archive: %s\n", rel); return 1; }
+        if (size < 0 || a < 0 || b < 0 || a > size || b > size - a || size - b > s + sn - q) goto bad;
+        uint8_t *own = b ? next_stream(f, n, &pos, &bn) : NULL;
+        if (b && (!own || bn != b)) goto bad;
+        for (char *c = rel; (c = strchr(c, '/')); *c++ = '/') { *c = 0; if (mkdir(name, 0777) && errno != EEXIST) { perror(name); return 1; } }
+        if (pl && rel[pl - 1] != '/') {
+            FILE *o = fopen(name, "wb"); if (!o) { perror(name); return 1; }
+            fwrite(q, 1, a, o); if (b) fwrite(own, 1, b, o); fwrite(q + a, 1, size - a - b, o);
+            if (fclose(o)) { perror(name); return 1; }
+        }
+        chmod(name, perm);
+        q += size - b; total += size; free(own); free(name);
+    }
+    fprintf(stderr, "%lld files, %lld bytes\n", (long long)count, (long long)total);
+    return 0;
+bad:
+    fprintf(stderr, "corrupt archive\n"); return 1;
+}
 int main(int argc, char **argv) {
     init_tables();
     if (getenv("HUGE")) OPT_HUGE = atoi(getenv("HUGE"));
+    if (argc >= 5 && !strcmp(argv[1], "a")) {   /* fm4 a [-m bytes] LEVEL OUT PATH... */
+        int media = 1, k = 2;
+        if (!strcmp(argv[k], "-m")) { if (!strcmp(argv[k + 1], "bytes")) media = 0; else if (strcmp(argv[k + 1], "auto")) goto usage; k += 2; }
+        if (argc < k + 3 || argv[k][0] < '0' || argv[k][0] > '5' || argv[k][1]) goto usage;
+        if (getenv("LR")) LR = atoi(getenv("LR"));
+        return archive(argv[k][0] - '0', media, argv[k + 1], argv + k + 2, argc - k - 2);
+    }
+    if ((argc == 3 || argc == 4) && !strcmp(argv[1], "x")) return extract(argv[2], argc == 4 ? argv[3] : ".");
     if (argc >= 6 && !strcmp(argv[1], "enc")) {
         int level = atoi(argv[2]), video = !strcmp(argv[3], "video"), mode = !strcmp(argv[3], "image") || video ? 2 : !strcmp(argv[3], "audio") ? 3 : 1;
         int64_t width = mode >= 2 ? atoll(argv[4]) : 0, fheight = video ? atoll(argv[5]) : 0, L, n;
@@ -803,7 +970,14 @@ int main(int argc, char **argv) {
         return spit(argv[3], d, L);
     }
 usage:
-    fprintf(stderr, "usage: fm4 enc LEVEL(0-5) bytes IN OUT | fm4 enc LEVEL image WIDTH IN OUT | fm4 dec IN OUT\n"
-                    "       env FEAT overrides the level's feature set; BB, LIMIT, LR, HUGE for experiments\n");
+    fprintf(stderr, "usage: fm4 enc LEVEL(0-5) bytes IN OUT\n"
+                    "       fm4 enc LEVEL image WIDTH IN OUT          raw RGB24\n"
+                    "       fm4 enc LEVEL audio CHANNELS IN OUT       raw 16-bit little-endian PCM\n"
+                    "       fm4 enc LEVEL video WIDTH HEIGHT IN OUT   raw RGB24 frames\n"
+                    "       fm4 dec IN OUT\n"
+                    "       fm4 a [-m auto|bytes] LEVEL OUT PATH...   archive files and directories; auto (default) uses the\n"
+                    "                                                 audio model for WAV and the image model for BMP/PPM, bytes does not\n"
+                    "       fm4 x IN [DIR]                            extract an archive\n"
+                    "       env FEAT, FEAT2, BB, LR, HUGE for experiments\n");
     return 2;
 }
