@@ -70,6 +70,8 @@ size / 64 MB runs of whole frames, coded and decoded in parallel (container `FMV
 the cut depends only on the data, so the file is the same for any thread count. 24 s 270x480 short
 (280 MB raw): 4 segments, +3.0% size, 590 s -> 150 s, decode 607 s -> 153 s; 3 min 320x180 (933 MB):
 13 segments, +4.7%, 2011 s -> 469 s (4 cores, 8 threads). Smaller videos stay one FM4 stream.
+The native BPL build (`bpl/fm4`, same `-t N`) writes and reads the same segmented files; the wasm build
+reads and writes single FM4 streams only.
 
 ```bash
 make c bpl4 wasm4 BPL=~/Projects/bpl3/bpl     # BPL needs bpl3 staging 80d04313 or later
