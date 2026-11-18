@@ -817,6 +817,27 @@ typedef struct { char *path; uint8_t *d; int64_t size, a, b, width; int mode, pe
 static Ent *ents; static int nents;
 static void put64(uint8_t *p, uint64_t v) { for (int i = 0; i < 8; i++) p[i] = v >> (8 * i); }
 static int64_t get64(const uint8_t *p) { return (int64_t)get32(p) | (int64_t)get32(p + 4) << 32; }
+/* Lexical normalization in place: drops leading "/", empty and "." components, resolves ".." against the
+   components before it, keeps a trailing "/" (empty directory entries). Returns how many ".." went above
+   the start, i.e. would leave the base directory. No filesystem lookups, so symlinks are not resolved. */
+static int norm_path(char *p) {
+    char *w = p, *r = p; int up = 0, dir = *p && p[strlen(p) - 1] == '/';
+    while (*r) {
+        while (*r == '/') r++;
+        char *e = r; while (*e && *e != '/') e++;
+        size_t len = e - r;
+        if (len == 2 && r[0] == '.' && r[1] == '.') {
+            if (w > p) { while (w > p && w[-1] != '/') w--; if (w > p) w--; } else up++;
+        } else if (len && !(len == 1 && r[0] == '.')) {
+            if (w > p) *w++ = '/';
+            memmove(w, r, len); w += len;
+        }
+        r = e;
+    }
+    if (dir && w > p) *w++ = '/';
+    *w = 0;
+    return up;
+}
 static void add_path(const char *path) {
     struct stat st;
     if (lstat(path, &st)) { perror(path); exit(1); }
@@ -832,15 +853,16 @@ static void add_path(const char *path) {
         if (any) return;
     }
     if (S_ISREG(st.st_mode) || S_ISDIR(st.st_mode)) {   /* a file, or an empty directory (stored as a path ending in "/") */
-        const char *name = path;   /* stored name: the path as given, without leading "/", "./", "../" */
-        for (;;) { if (*name == '/') name++; else if (!strncmp(name, "./", 2)) name += 2; else if (!strncmp(name, "../", 3)) name += 3; else break; }
-        for (const char *q; (q = strstr(name, "/../")); ) name = q + 4;   /* and nothing up to a ".." inside the path */
-        if (strlen(name) > 65535) { fprintf(stderr, "%s: path too long\n", path); exit(1); }
+        /* stored name: the path normalized; ".." above the start is dropped (like tar), so "../x" is stored as "x" */
+        char *name = malloc(strlen(path) + 2); strcpy(name, path);
+        if (norm_path(name)) fprintf(stderr, "%s: leading \"..\" removed, stored as %s\n", path, *name ? name : ".");
+        if (strlen(name) > 65534) { fprintf(stderr, "%s: path too long\n", path); exit(1); }
         if (!(nents & (nents + 1))) ents = realloc(ents, (2 * nents + 2) * sizeof(Ent));
         Ent *e = &ents[nents++]; memset(e, 0, sizeof *e);
         e->perm = st.st_mode & 0777;
-        if (S_ISDIR(st.st_mode)) { e->path = malloc(strlen(name) + 2); sprintf(e->path, "%s/", name); e->d = malloc(1); }
-        else { e->path = strdup(name); e->d = slurp(path, &e->size); }
+        if (S_ISDIR(st.st_mode)) { if (!*name) { nents--; free(name); return; } if (name[strlen(name) - 1] != '/') strcat(name, "/"); e->path = name; e->d = malloc(1); }
+        else if (!*name) { fprintf(stderr, "%s: no file name, skipped\n", path); nents--; free(name); return; }
+        else { e->path = name; e->d = slurp(path, &e->size); }
     } else fprintf(stderr, "%s: not a regular file, skipped\n", path);
 }
 static int ent_cmp(const void *x, const void *y) {
@@ -947,12 +969,6 @@ static int archive(int level, int media, int threads, const char *out, char **pa
     fprintf(stderr, "%d files, %lld -> %lld bytes\n", nents, (long long)total, (long long)written);
     return 0;
 }
-static int bad_path(const char *p) {   /* absolute, empty, or with a ".." component: would write outside the target directory */
-    if (!*p || *p == '/') return 1;
-    for (const char *s = p; s; s = strchr(s, '/'), s = s ? s + 1 : NULL)
-        if (!strncmp(s, "..", 2) && (s[2] == '/' || !s[2])) return 1;
-    return 0;
-}
 static int extract(const char *in, const char *dir, int threads) {
     int64_t n, sn = 0, all = 0; uint8_t *f = slurp(in, &n);
     if (n < 8 || memcmp(f, "FMA\x02", 4)) { fprintf(stderr, "not an FMA archive\n"); return 1; }
@@ -983,7 +999,9 @@ static int extract(const char *in, const char *dir, int threads) {
         int pl = rd16(s + ip); char *name = malloc(strlen(dir) + pl + 2), *rel = name + strlen(dir) + 1;
         sprintf(name, "%s/", dir); memcpy(rel, s + ip + 2, pl); rel[pl] = 0; ip += 2 + pl;
         int perm = get32(s + ip) & 0777; int64_t size = get64(s + ip + 4), a = get64(s + ip + 12), b = get64(s + ip + 20); ip += 28;
-        if ((int64_t)strlen(rel) != pl || bad_path(rel)) { fprintf(stderr, "unsafe path in archive: %s\n", rel); return 1; }
+        /* the stored name is normalized again here and must stay inside DIR: not absolute, no ".." above the start */
+        if ((int64_t)strlen(rel) != pl || rel[0] == '/' || norm_path(rel) || !*rel) { fprintf(stderr, "unsafe path in archive: %.*s\n", pl, s + ip - 28 - pl); return 1; }
+        pl = strlen(rel);
         if (size < 0 || a < 0 || b < 0 || a > size || b > size - a || size - b > s + sn - q) goto bad;
         if (b && (k >= nj || jobs[k].L != b)) goto bad;
         uint8_t *own = b ? jobs[k++].out : NULL;
