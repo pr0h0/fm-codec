@@ -41,3 +41,7 @@ bytes; time = encode wall seconds. All fm4 files decode back bit-exactly.
 fm4 is 22-34% smaller than the best other tool (xz on three clips, x264 on the full-HD one) at ~0.47 MB/s.
 Memory: full-HD clip 5.75 GB before the error rings (cf65592), 0.66 GB after; 933 MB clip 1.2 GB.
 4 independent segments of the 24 s short in parallel: 1,572,045 bytes (+3.0%), 247 s instead of 590 s.
+Segmented video (FMV, size / 64 MB runs of frames, all cores of an i7-6700):
+ short 270x480 24 s: 4 segments 1,572,085 bytes (+3.0%), enc 590 -> 150 s, dec 607 -> 153 s
+ long 320x180 3 min: 13 segments 3,514,310 bytes (+4.7%), enc 2011 -> 469 s, dec 1894 -> 470 s (xz -9e 4,293,112)
+ same file for -t 1 and -t 4 (checked with SEG_MB=2 on a 10-frame clip).

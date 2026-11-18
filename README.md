@@ -65,7 +65,11 @@ const packed = fm2.encode(bytes, { level: 4, mode: "image", width: 2048 });
 fm4 adds to fm3: an online least-squares (OLS) pixel predictor, a 2-D match model and exact-colour
 contexts for images; four text contexts, a fourth mixer, mixer selection by context hit count and
 (level 5) per-context run inputs for text; a 16-bit mixer; and two new modes, **audio** (16-bit PCM)
-and **video** (raw RGB frames, uses the previous frame).
+and **video** (raw RGB frames, uses the previous frame). Video of 128 MB raw or more is cut into
+size / 64 MB runs of whole frames, coded and decoded in parallel (container `FMV\x01`, see `c/fm4.c`);
+the cut depends only on the data, so the file is the same for any thread count. 24 s 270x480 short
+(280 MB raw): 4 segments, +3.0% size, 590 s -> 150 s, decode 607 s -> 153 s; 3 min 320x180 (933 MB):
+13 segments, +4.7%, 2011 s -> 469 s (4 cores, 8 threads). Smaller videos stay one FM4 stream.
 
 ```bash
 make c bpl4 wasm4 BPL=~/Projects/bpl3/bpl     # BPL needs bpl3 staging 80d04313 or later
@@ -73,10 +77,10 @@ c/fm4 enc 4 bytes in.txt out.fm4              # levels 0..5
 c/fm4 enc 4 image 2048 in.rgb out.fm4         # raw RGB24, width
 c/fm4 enc 4 audio 2 in.pcm out.fm4            # raw 16-bit little-endian PCM, channels
 c/fm4 enc 4 video 640 360 in.rgb out.fm4      # raw RGB24 frames, width height
-c/fm4 dec out.fm4 restored
+c/fm4 dec out.fm4 restored                    # -t N after enc/dec: processes for video segments (default: all cores)
 c/fm4 a 4 out.fma dir file ...                # archive files and directories (C only)
 c/fm4 a -m bytes 4 out.fma dir                # same, without the audio/image models
-c/fm4 a -t 1 4 out.fma dir                    # one process, smallest output (default: all cores)
+c/fm4 a -t 1 4 out.fma dir                    # one process (default: all cores); same file for any -t
 c/fm4 x out.fma destdir                       # extract (also parallel)
 ```
 
@@ -85,10 +89,11 @@ and compressed as one stream, so small similar files share context. The PCM data
 goes through the audio model and the pixels of 24-bit BMP (width a multiple of 4) and PPM files through
 the image model, each as its own stream; `-m bytes` turns that off. Files that look already compressed
 (byte entropy above 7.8 bits: PNG, JPEG, MP4, zip) are stored. Permissions and empty directories are
-kept; symlinks and timestamps are not. Streams are coded in parallel (one process each, about 350–420 MB
-of memory per process); solid data over 16 MB is cut into parts of at least 8 MB, at most one per
-process, which costs some size: a 32 MB tar with `-t 1` 4,369,452 bytes in 106 s, in 3 parts 4,516,281
-(+3.4%) in 39 s (`xz -9e` 5,839,928). A source tree with binaries (80 files, 4.18 MB): level 4
+kept; symlinks and timestamps are not. Streams are coded and decoded in parallel (one process each, about
+350–420 MB of memory per process). Solid data is cut into size / 8 MB equal parts (so parts are at least
+8 MB); the cut depends only on the data, so the archive is byte-identical for any `-t` and any machine.
+A 32 MB tar: 3 parts, 4,516,281 bytes in 31 s, extract 32 s (one stream: 4,369,452 bytes, 106 s;
+`xz -9e` 5,839,928). A source tree with binaries (80 files, 4.18 MB): level 4
 276,794 bytes in 13.7 s, level 2 411,136 in 3.8 s; `tar | xz -9e` 404,800, `zstd -19` 443,387,
 `zip -9` 935,388. `-m bytes` is not a speed-up at the same level (a WAV at level 4: 1.9 s and 69 KB
 with the audio model, 2.3 s and 167 KB without); use a lower level for speed.

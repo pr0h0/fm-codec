@@ -955,9 +955,11 @@ static int archive(int level, int media, int threads, const char *out, char **pa
         memcpy(p, e->d, e->a); p += e->a;
         memcpy(p, e->d + e->a + e->b, e->size - e->a - e->b); p += e->size - e->a - e->b;
     }
-    /* the solid data is cut into equal parts of at least PART_MB (default 8 MB), at most one per thread: costs a little size, scales the speed */
+    /* the solid data is cut into n / PART_MB equal parts (default 8 MB, so each is at least that): costs a little
+       size, lets encoding and decoding run in parallel. The cut depends only on the data, never on the thread
+       count, so the archive is the same on every machine. */
     int64_t part = (getenv("PART_MB") ? atoll(getenv("PART_MB")) : 8) << 20;
-    int nsolid = part > 0 && n / part > 1 ? (n / part < threads ? n / part : threads) : 1, nj = 0;
+    int nsolid = part > 0 && n / part > 1 ? (int)(n / part) : 1, nj = 0;
     Job *jobs = calloc(nsolid + nown, sizeof(Job));
     for (int k = 0; k < nsolid; k++) { int64_t lo = n * k / nsolid, hi = n * (k + 1) / nsolid; jobs[nj++] = (Job){1, level, 0, hi - lo, 0, s + lo, NULL, 0}; }
     for (int i = 0; i < nents; i++) { Ent *e = &ents[i]; if (e->b) jobs[nj++] = (Job){e->mode, e->mode ? level : 0, e->width, e->b, 0, e->d + e->a, NULL, 0}; }
@@ -1022,6 +1024,45 @@ static int extract(const char *in, const char *dir, int threads) {
 bad:
     fprintf(stderr, "corrupt archive\n"); return 1;
 }
+/* Segmented video: "FMV\x01" | u32 nseg | nseg x (u64 length | FM4 stream), each stream a run of whole frames.
+   Inputs of at least 2 x SEG_MB (default 64 MB) are cut into L / SEG_MB equal runs of frames, so the cut
+   depends only on the data; smaller inputs stay one plain FM4 stream. Segments are coded in parallel. */
+static int64_t video_segments(int64_t L, int64_t fbytes) {
+    int64_t seg = (getenv("SEG_MB") ? atoll(getenv("SEG_MB")) : 64) << 20, nf = fbytes ? L / fbytes : 0;
+    int64_t ns = seg > 0 ? L / seg : 1;
+    return ns > nf ? (nf > 0 ? nf : 1) : (ns < 1 ? 1 : ns);
+}
+static int enc_video_segments(int level, int64_t width, uint8_t *data, int64_t L, int64_t ns, int threads, const char *out) {
+    int64_t fbytes = 3 * (width & 0xFFFF) * (width >> 16), nf = L / fbytes;
+    Job *jobs = calloc(ns, sizeof(Job));
+    for (int64_t k = 0; k < ns; k++) {
+        int64_t a = nf * k / ns * fbytes, b = nf * (k + 1) / ns * fbytes;
+        jobs[k] = (Job){2, level, width, b - a, 0, data + a, NULL, 0};
+    }
+    if (run_jobs(jobs, ns, threads, 0)) { fprintf(stderr, "compression failed\n"); return 1; }
+    FILE *f = fopen(out, "wb"); if (!f) { perror(out); return 1; }
+    uint8_t h[8] = {'F', 'M', 'V', 1}; for (int i = 0; i < 4; i++) h[4 + i] = (uint64_t)ns >> (8 * i);
+    fwrite(h, 1, 8, f);
+    for (int64_t k = 0; k < ns; k++) fwrite(jobs[k].out, 1, 8 + get64(jobs[k].out), f);
+    if (fclose(f)) { perror(out); return 1; }
+    return 0;
+}
+static uint8_t *dec_video_segments(uint8_t *f, int64_t n, int threads, int64_t *outLen) {
+    int64_t ns = get32(f + 4), all = 0, pos = 8; Job *jobs = calloc(ns ? ns : 1, sizeof(Job));
+    for (int64_t k = 0; k < ns; k++) {
+        if (n - pos < 8 + HDR) return NULL;
+        int64_t m = get64(f + pos), L = get64(f + pos + 8 + 16);
+        if (m < HDR || m > n - pos - 8 || L < 0 || L > (int64_t)1 << 40 || all + L < all) return NULL;
+        jobs[k] = (Job){0, 0, 0, L, m, f + pos + 8, NULL, 0};
+        all += L; pos += 8 + m;
+    }
+    if (pos != n) return NULL;
+    uint8_t *d = mmap(NULL, all ? all : 1, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0), *o = d;
+    if (d == MAP_FAILED) return NULL;
+    for (int64_t k = 0; k < ns; k++) { jobs[k].out = o; o += jobs[k].L; }
+    if (run_jobs(jobs, ns, threads, 1)) return NULL;
+    *outLen = all; return d;
+}
 int main(int argc, char **argv) {
     init_tables();
     if (getenv("HUGE")) OPT_HUGE = atoi(getenv("HUGE"));
@@ -1037,6 +1078,11 @@ int main(int argc, char **argv) {
         if (getenv("LR")) LR = atoi(getenv("LR"));
         return archive(argv[k][0] - '0', media, threads, argv[k + 1], argv + k + 2, argc - k - 2);
     }
+    int threads = sysconf(_SC_NPROCESSORS_ONLN);
+    if (argc >= 4 && (!strcmp(argv[1], "enc") || !strcmp(argv[1], "dec")) && !strcmp(argv[2], "-t")) {   /* fm4 enc|dec -t N ... */
+        if ((threads = atoi(argv[3])) < 1) goto usage;
+        memmove(argv + 2, argv + 4, (argc - 3) * sizeof *argv); argc -= 2;
+    }
     if (argc >= 6 && !strcmp(argv[1], "enc")) {
         int level = atoi(argv[2]), video = !strcmp(argv[3], "video"), mode = !strcmp(argv[3], "image") || video ? 2 : !strcmp(argv[3], "audio") ? 3 : 1;
         int64_t width = mode >= 2 ? atoll(argv[4]) : 0, fheight = video ? atoll(argv[5]) : 0, L, n;
@@ -1047,25 +1093,28 @@ int main(int argc, char **argv) {
         if (video && (width > 65535 || fheight <= 0 || fheight > 65535 || L % (3 * width * fheight))) { fprintf(stderr, "video: bad frame size\n"); return 1; }
         if (video) width |= fheight << 16;
         if (mode == 3 && (width <= 0 || width > 8 || L % (2 * width))) { fprintf(stderr, "audio: need 1-8 channels and a whole number of 16-bit frames\n"); return 1; }
+        int64_t ns = video ? video_segments(L, 3 * (width & 0xFFFF) * fheight) : 1;
+        if (ns > 1) return enc_video_segments(level, width, data, L, ns, threads, argv[7]);
         uint8_t *o = fm4_encode(level, mode, width, data, L, &n);
         return spit(argv[(mode >= 2 ? 6 : 5) + video], o, n);
     }
     if (argc == 4 && !strcmp(argv[1], "dec")) {
         int64_t n, L; uint8_t *f = slurp(argv[2], &n);
-        uint8_t *d = fm4_decode(f, n, &L);
-        if (!d) { fprintf(stderr, "not an FM4 file\n"); return 1; }
+        uint8_t *d = n >= 8 && !memcmp(f, "FMV\x01", 4) ? dec_video_segments(f, n, threads, &L) : fm4_decode(f, n, &L);
+        if (!d) { fprintf(stderr, "not an FM4 file, or corrupt\n"); return 1; }
         return spit(argv[3], d, L);
     }
 usage:
     fprintf(stderr, "usage: fm4 enc LEVEL(0-5) bytes IN OUT\n"
                     "       fm4 enc LEVEL image WIDTH IN OUT          raw RGB24\n"
                     "       fm4 enc LEVEL audio CHANNELS IN OUT       raw 16-bit little-endian PCM\n"
-                    "       fm4 enc LEVEL video WIDTH HEIGHT IN OUT   raw RGB24 frames\n"
+                    "       fm4 enc LEVEL video WIDTH HEIGHT IN OUT   raw RGB24 frames; 128 MB and more: segments of >= 64 MB\n"
                     "       fm4 dec IN OUT\n"
+                    "       fm4 enc|dec -t N ...                      processes for video segments (default: all cores)\n"
                     "       fm4 a [-m auto|bytes] [-t N] LEVEL OUT PATH...   archive files and directories\n"
                     "             -m auto (default): audio model for WAV, image model for BMP/PPM; -m bytes: neither\n"
-                    "             -t N: processes (default: all cores); data over 16 MB is cut into up to N parts, -t 1 keeps one part\n"
+                    "             -t N: processes (default: all cores); solid data is cut into parts of >= 8 MB (same file for any N)\n"
                     "       fm4 x [-t N] IN [DIR]                            extract an archive\n"
-                    "       env FEAT, FEAT2, BB, LR, HUGE for experiments\n");
+                    "       env FEAT, FEAT2, BB, LR, HUGE, PART_MB (archive), SEG_MB (video) for experiments\n");
     return 2;
 }
