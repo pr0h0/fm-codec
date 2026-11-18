@@ -108,3 +108,18 @@ Changes (output byte-identical):
   audio mono 0.96 MB           2.61            1.96           2.33        2.04
   video 2 frames 640x360       3.51            2.72           3.14        3.05
 Tried, no gain in BPL: earlier prefetch, 16-bit stretch table (both within noise, not kept).
+
+== 2026-11-18: BPL vs C gap (i7-6700, level 4, user s, min of 3-4, pinned to one core) ==
+Found with a ptrace sampling profiler (per source line) and microbenchmarks:
+  1. runChunk was not @[unchecked]: bounds checks in the image/video code. Marking it unchecked: video 3.21 -> 2.97.
+  2. int loop indexes: BPL int +,-,* wrap (R-TYPE-13) and are emitted without nsw, so LLVM keeps a sext per
+     index and cannot widen the induction variable. 16-input OLS microbenchmark: int indexes 1.52 s, long 1.22 s,
+     C 1.25 s. olsUpd now uses long indexes. Reported to bpl3 (opt-in nsw attribute requested).
+                     C      BPL before   BPL now
+  video 2 frames   2.88      3.21-3.32    2.83
+  audio mono       2.03      2.15-2.26    2.07
+  audio stereo     1.52      -            1.52
+  image 640x426    1.58      1.71         1.60
+  image L5         2.07      2.17         2.06
+  text 1 MB        2.74      2.75         2.74
+  wasm (Node 24, wall): text 1 MB 6.00 -> 5.82, video 5.28 -> 4.98, audio 1.35 -> 1.21

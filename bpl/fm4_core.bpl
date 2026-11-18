@@ -358,33 +358,25 @@ frame olsPred(o: *double, n: int) ret double {
 }
 
 # Lm: scratch [40][40] + z[40]. lam: forgetting factor. cnt: samples since the last solve.
-# row[k] = a * row[k] + c * x[k] and row[k] -= c * col[k]: separate functions so the two buffers can be
-# declared non-overlapping, which lets the loops vectorize.
+# row[k] = a * row[k] + c * x[k] for k < n: rows and x never overlap, which lets the loop vectorize without
+# runtime overlap checks.
 @[unchecked]
-frame olsDecay(@[noalias] row: *double, @[noalias] x: *double, n: int, a: double, c: double) {
-    loop (local k: int = 0; k < n; k = k + 1) {
+frame olsDecay(@[noalias] row: *double, @[noalias] x: *double, n: long, a: double, c: double) {
+    loop (local k: long = 0; k < n; k = k + 1) {
         row[k] = a * row[k] + c * x[k];
     }
 }
 
+# Loop indexes here are long: int arithmetic wraps (R-TYPE-13), so LLVM cannot widen int indexes and the
+# solve runs about 20% slower with them.
 @[unchecked]
-frame olsSub(@[noalias] row: *double, @[noalias] col: *double, lo: int, hi: int, c: double) {
-    loop (local k: int = lo; k <= hi; k = k + 1) {
-        row[k] = row[k] - c * col[k];
-    }
-}
-
-@[unchecked]
-frame olsUpd(o: *double, Lm: *double, n: int, cnt: *int, lam: double, y: double) {
+frame olsUpd(o: *double, Lm: *double, ni: int, cnt: *int, lam: double, y: double) {
+    local n: long = cast<long>(ni);
     local oml: double = 1.0 - lam;
     local col: double[40];
-    local x: *double = &col[0];
-    loop (local j: int = 0; j < n; j = j + 1) {
-        col[j] = o[1680 + j];
-    }
-    loop (local j: int = 0; j < n; j = j + 1) {
-        local c: double = oml * x[j];
-        olsDecay(&o[j * 40], x, j + 1, lam, c);
+    loop (local j: long = 0; j < n; j = j + 1) {
+        local c: double = oml * o[1680 + j];
+        olsDecay(&o[j * 40], &o[1680], j + 1, lam, c);
         o[1600 + j] = lam * o[1600 + j] + c * y;
     }
     cnt[0] = cnt[0] + 1;
@@ -394,14 +386,14 @@ frame olsUpd(o: *double, Lm: *double, n: int, cnt: *int, lam: double, y: double)
     cnt[0] = 0;
     # Cholesky + forward substitution, column by column: every element gets its products subtracted in the
     # same order (t ascending) as the row-by-row form, so the result is bit-identical, and the inner loop
-    # has no dependency chain.
-    loop (local j: int = 0; j < n; j = j + 1) {
-        loop (local k: int = 0; k <= j; k = k + 1) {
+    # has no dependency chain. Lm: [40][40] factor, then z[40] at 1600.
+    loop (local j: long = 0; j < n; j = j + 1) {
+        loop (local k: long = 0; k <= j; k = k + 1) {
             Lm[j * 40 + k] = o[j * 40 + k] + ((j == k) ? 0.001 : 0.0);
         }
         Lm[1600 + j] = o[1600 + j];
     }
-    loop (local t: int = 0; t < n; t = t + 1) {
+    loop (local t: long = 0; t < n; t = t + 1) {
         if (Lm[t * 40 + t] <= 0.0) {
             return;
         }
@@ -409,19 +401,21 @@ frame olsUpd(o: *double, Lm: *double, n: int, cnt: *int, lam: double, y: double)
         local zt: double = Lm[1600 + t] / d;
         Lm[t * 40 + t] = d;
         Lm[1600 + t] = zt;
-        loop (local j: int = t + 1; j < n; j = j + 1) {
+        loop (local j: long = t + 1; j < n; j = j + 1) {
             col[j] = Lm[j * 40 + t] / d;
             Lm[j * 40 + t] = col[j];
         }
-        loop (local j: int = t + 1; j < n; j = j + 1) {
+        loop (local j: long = t + 1; j < n; j = j + 1) {
             local cj: double = col[j];
-            olsSub(&Lm[j * 40], x, t + 1, j, cj);
+            loop (local k: long = t + 1; k <= j; k = k + 1) {
+                Lm[j * 40 + k] = Lm[j * 40 + k] - cj * col[k];
+            }
             Lm[1600 + j] = Lm[1600 + j] - cj * zt;
         }
     }
-    loop (local j: int = n - 1; j >= 0; j = j - 1) {
+    loop (local j: long = n - 1; j >= 0; j = j - 1) {
         local v: double = Lm[1600 + j];
-        loop (local t: int = j + 1; t < n; t = t + 1) {
+        loop (local t: long = j + 1; t < n; t = t + 1) {
             v = v - Lm[t * 40 + j] * o[1640 + t];
         }
         o[1640 + j] = v / Lm[j * 40 + j];
@@ -669,7 +663,7 @@ frame arenaSize(mode: int, bb: int, feat: uint, feat2: uint, L: long, nchan: lon
 # small arrays that are kept in locals while the loop runs. The work is split into calls because
 # WebAssembly engines only switch a function to optimized code when it is entered again: one call
 # for the whole input would run in baseline code to the end.
-@[noinline]
+@[noinline, unchecked]
 frame runChunk(mode: int, bb: int, limit: int, feat: uint, feat2: uint, widthF: long, data: *u8, L: long, i0: long, i1: long) {
     local first: bool = i0 == 0;
     local img: bool = mode == 2;

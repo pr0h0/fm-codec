@@ -109,8 +109,8 @@ Without the audio model (bytes mode) the same audio clips come out 5-60% larger 
 mode has no motion compensation, so camera footage gains little over coding the frames as one image.
 Raw numbers: `bench/results/media_fm4.txt`.
 
-The BPL build produces byte-identical files (native and WebAssembly) and is 1.02-1.12x the time of the
-C build (clang; text 2.56 s vs 2.60 s per MB at level 4, video 2.72 s vs 3.05 s); the wasm build runs the model in 16 KB chunks so browsers switch to optimized code.
+The BPL build produces byte-identical files (native and WebAssembly) and runs at the same speed as the
+C build (clang) within about 2% in every mode; the wasm build runs the model in 16 KB chunks so browsers switch to optimized code.
 `bench/results/fm4_c_vs_bpl.txt`, `fm4_bpl_opt.txt`. There is no JS port of fm4 yet (fm3 has one).
 
 fm4 is slow: about 0.3 MB/s for text and images at level 4, 0.2-0.4 MB/s for audio.
