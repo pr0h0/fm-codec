@@ -406,19 +406,12 @@ frame olsUpd(o: *double, Lm: *double, n: int, cnt: *int, lam: double, y: double)
 
 # ---- mixer kernels ----
 # sum of w[k] * st[k] and the weight update, over n inputs (32-bit wrapping sum: order is free).
-# 64-bit targets take fixed blocks of 16 and 8 over n rounded up to 8, which compile to straight
-# vector code with no scalar remainder loop: the inputs past n are 0, so they add nothing and leave
-# their weights unchanged (each weight set has room for 96). wasm32 has no vectors by default and is
-# faster with the plain loop; sizeof(*u8) is a constant, so only one form is compiled in.
+# Fixed blocks of 16 and 8 over n rounded up to 8 compile to straight vector code with no scalar
+# remainder loop (native and wasm simd128): the inputs past n are 0, so they add nothing and leave
+# their weights unchanged (each weight set has room for 96).
 @[unchecked]
 frame dot16(w: *i16, st: *i16, n: int) ret int {
     local s: int = 0;
-    if (sizeof(*u8) != 8) {
-        loop (local i: int = 0; i < n; i = i + 1) {
-            s = s + cast<int>(w[i]) * cast<int>(st[i]);
-        }
-        return s;
-    }
     local n8: int = (n + 7) & -8;
     local k: int = 0;
     loop (k + 16 <= n8) {
@@ -447,34 +440,21 @@ frame updW(w: int, s: int, el: int) ret int {
     return v;
 }
 
-# The block form writes its results through t[]: with the store in the same pass the compiler must
-# assume w and st overlap and falls back to scalar code.
+# noalias: w is a weight set in the arena, st the input array on runChunk's stack; they never
+# overlap. Without it the compiler must assume they do and the blocks fall back to scalar code.
 @[unchecked]
-frame upd16(w: *i16, st: *i16, n: int, el: int) {
-    if (sizeof(*u8) != 8) {
-        loop (local i: int = 0; i < n; i = i + 1) {
-            w[i] = cast<i16>(updW(cast<int>(w[i]), cast<int>(st[i]), el));
-        }
-        return;
-    }
+frame upd16(@[noalias] w: *i16, @[noalias] st: *i16, n: int, el: int) {
     local n8: int = (n + 7) & -8;
-    local t: int[16];
     local k: int = 0;
     loop (k + 16 <= n8) {
         loop (local j: int = 0; j < 16; j = j + 1) {
-            t[j] = updW(cast<int>(w[k + j]), cast<int>(st[k + j]), el);
-        }
-        loop (local j: int = 0; j < 16; j = j + 1) {
-            w[k + j] = cast<i16>(t[j]);
+            w[k + j] = cast<i16>(updW(cast<int>(w[k + j]), cast<int>(st[k + j]), el));
         }
         k = k + 16;
     }
     if (k < n8) {
         loop (local j: int = 0; j < 8; j = j + 1) {
-            t[j] = updW(cast<int>(w[k + j]), cast<int>(st[k + j]), el);
-        }
-        loop (local j: int = 0; j < 8; j = j + 1) {
-            w[k + j] = cast<i16>(t[j]);
+            w[k + j] = cast<i16>(updW(cast<int>(w[k + j]), cast<int>(st[k + j]), el));
         }
     }
 }

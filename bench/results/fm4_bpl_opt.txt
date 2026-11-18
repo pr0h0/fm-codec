@@ -58,3 +58,37 @@ a8_wav_48000_2 (audio, 2 ch)         L4    1.91    1.79    0.94x
 a0_wav_24000_1 (audio, 1 ch)         L4    2.58    2.39    0.93x
 v3 640x360, 3 frames (video)         L4    5.33    4.83    0.91x
 Output byte-identical to C (native and wasm) on audio L1-5, video L1/2/4 and the bytes/image regression set.
+
+BPL compiler 80d04313 (-msimd128 fix, @[noalias], loop copies of global pointers, target constants)
+date: 2026-11-18, same machine and method (user seconds, min of 3 interleaved runs, 6 for native text/audio/video)
+before = tree 20a8ffd built with the new compiler; after = this tree
+
+native encode L4                     C   before    after
+text_1mb (bytes)                   3.24    2.46    2.46
+style_win_library (512)            1.28    0.95    0.92
+img15_png_1024 (1024)              7.88    5.84    5.84
+text_1mb decode                            2.46    2.45
+a8_wav_48000_2, first 600 KB (audio)       1.66    1.67
+v3 640x360, 2 frames (video)               3.16    3.17
+
+wasm encode L4, fresh node process   before   before, wasm4simd (--cpu bleeding-edge)   after (make wasm4)
+text_1mb (bytes)                      7.61     5.19                                     5.11
+style_win_library (512)               2.47     1.99                                     1.85
+(after, node --no-liftoff, text: 5.13)
+
+What changed
+- make wasm4 builds with --clang-flag -msimd128; wasm4simd / fm4.simd.wasm are gone. Same source,
+  -msimd128 vs --cpu bleeding-edge: 5.29 vs 5.22 text, 2.02 vs 2.03 style, i.e. the same.
+- dot16 / upd16: the block form on every target (the sizeof(*u8) switch and the plain loops are gone).
+  With simd128 the blocks are faster in wasm too: style 2.02 -> 1.88, text 5.29 -> 5.24.
+- upd16 takes @[noalias] w, st and stores directly; the temporary array is gone. Speed unchanged
+  (native and wasm). @[noalias] alone, with the array kept, gives the same native binary bit for bit.
+Tried and not kept
+- @[noalias] on dot16: it only reads, nothing to gain. On olsUpd (o, Lm, cnt): audio 1.68 vs 1.65,
+  video 3.17 vs 3.22, no gain.
+- Dropping the local copies of RECIP / STRETCH in runChunk: 0 .. 2% slower (text L4 2.51 vs 2.42,
+  L5 4.23 vs 4.17, wasm text 5.23 vs 5.14). The automatic copy does not apply, the loop makes calls.
+- __TARGET_WASM__: not needed, no target switch is left.
+Output byte-identical to c/fm4 (native and wasm) and decode round trip in all three directions on
+62 cases: bytes L0-5 (5 inputs incl. empty and 1 byte), image L1-5, audio L1-5 (1 and 2 channels),
+video L1/2/4, plus text_1mb L4 and style_win_library L2/L4.
