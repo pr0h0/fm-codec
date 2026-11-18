@@ -1,0 +1,32 @@
+<!doctype html><meta charset=utf-8><title>fm4 test</title><pre id=o></pre>
+<script type=module>
+import { createFm4 } from "/bpl/fm4wasm.mjs";
+const get = async (p) => new Uint8Array(await (await fetch("/data/" + p)).arrayBuffer());
+const eq = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
+const log = (...a) => { document.getElementById("o").textContent += a.join(" ") + "\n"; console.log(a.join(" ")); };
+const time = async (f) => { let ticks = 0; const iv = setInterval(() => ticks++, 50); const t = performance.now(); const r = await f(); clearInterval(iv); return [r, ((performance.now() - t) / 1000).toFixed(2), ticks]; };
+window.results = [];
+try {
+  const t1 = await get("t1"), t1c = await get("t1.fm4"), img = await get("img.rgb"), imgc = await get("img.fm4"), v = await get("v.rgb"), vc = await get("v.fmv");
+  for (const threads of [1, 4]) {
+    const fm4 = await createFm4("/bpl/fm4.wasm", { threads });
+    let [o, s, tk] = await time(() => fm4.encode(t1, { level: 4, mode: "bytes" }));
+    log(`t${threads} text enc ${s}s same-as-C=${eq(o, t1c)} ui-ticks=${tk}`);
+    [o, s] = await time(() => fm4.decode(t1c)); log(`t${threads} text dec ${s}s ok=${eq(o, t1)}`);
+    [o, s] = await time(() => fm4.encode(img, { level: 4, mode: "image", width: 640 })); log(`t${threads} image enc ${s}s same-as-C=${eq(o, imgc)}`);
+    [o, s, tk] = await time(() => fm4.encode(v, { level: 4, mode: "video", width: 640, height: 360, segMB: 2 }));
+    log(`t${threads} video segmented enc ${s}s same-as-C=${eq(o, vc)} ui-ticks=${tk}`);
+    [o, s] = await time(() => fm4.decode(vc)); log(`t${threads} video dec ${s}s ok=${eq(o, v)}`);
+    fm4.terminate();
+  }
+  const fm4 = await createFm4("/bpl/fm4.wasm", { threads: 4 });
+  let bad = 0, ok = 0;
+  const cases = [vc.slice(0, 7), vc.slice(0, 20), vc.slice(0, 43), vc.slice(0, vc.length - 1)];
+  for (const p of [4, 8, 9, 16, 40, 41, 500, 30000]) { const c = vc.slice(); c[p] ^= 4; cases.push(c); }
+  for (const c of cases) { try { const d = await fm4.decode(c); eq(d, v) ? ok++ : bad++; } catch { ok++; } }
+  log(`corrupt: ${cases.length} cases, handled=${ok}, wrong-output=${bad}`);
+  const o = await fm4.decode(t1c); log(`after corrupt, text dec ok=${eq(o, t1)}`);
+  fm4.terminate();
+  log("DONE");
+} catch (e) { log("ERROR", e.stack || e); }
+</script>

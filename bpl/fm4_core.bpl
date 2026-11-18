@@ -506,8 +506,21 @@ frame arenaTake(n: long) ret *u8 {
 # must vectorize: unchecked)
 @[unchecked]
 frame fillTables(T: *uint, n: long) {
-    loop (local j: long = 0; j < n; j = j + 1) {
-        T[j] = ((j & 15) != 0) ? cast<uint>(16809984) : cast<uint>(0);
+    loop (local j: long = 0; j < 16; j = j + 1) {
+        T[j] = (j != 0) ? cast<uint>(16809984) : cast<uint>(0);
+    }
+    fillRep(cast<*u8>(T), 64, n * 4);
+}
+
+# p[0, unit) is set: repeat it over p[0, total) by doubling copies. In WebAssembly these become
+# memory.copy (bulk memory), much faster than an element loop that runs once in baseline code.
+@[unchecked]
+frame fillRep(p: *u8, unit: long, total: long) {
+    local have: long = unit;
+    loop (have < total) {
+        local n: long = (have < total - have) ? have : total - have;
+        memcpy(cast<*void>(ptrAdd(p, have)), cast<*void>(p), n);
+        have = have + n;
     }
 }
 
@@ -844,22 +857,17 @@ frame runChunk(mode: int, bb: int, limit: int, feat: uint, feat2: uint, widthF: 
     local SVN: *u8 = arenaTake(64 * 3);
     if (first) {
         fillTables(T, tTotal);
-        loop (local j: int = 0; j < 96 * 256; j = j + 1) {
-            SM[j] = cast<uint>(32768);
-        }
+        SM[0] = cast<uint>(32768);
+        fillRep(cast<*u8>(SM), 4, 96 * 256 * 4);
         local winit: i16 = cast<i16>((19661 * 6 / nin) >> 4);
-        loop (local j: int = 0; j < 2048 * 96; j = j + 1) {
-            W1[j] = winit;
-        }
-        loop (local j: int = 0; j < 768 * 96; j = j + 1) {
-            W2[j] = winit;
-        }
-        loop (local j: int = 0; j < 2048 * 96; j = j + 1) {
-            W3[j] = winit;
-        }
-        loop (local j: int = 0; j < 4096 * 96; j = j + 1) {
-            W4[j] = winit;
-        }
+        W1[0] = winit;
+        fillRep(cast<*u8>(W1), 2, 2048 * 96 * 2);
+        W2[0] = winit;
+        fillRep(cast<*u8>(W2), 2, 768 * 96 * 2);
+        W3[0] = winit;
+        fillRep(cast<*u8>(W3), 2, 2048 * 96 * 2);
+        W4[0] = winit;
+        fillRep(cast<*u8>(W4), 2, 4096 * 96 * 2);
         loop (local j: int = 0; j < 1024; j = j + 1) {
             WF[j] = XM4 ? 16384 : 21845;
         }
@@ -867,18 +875,15 @@ frame runChunk(mode: int, bb: int, limit: int, feat: uint, feat2: uint, widthF: 
         loop (local j: int = 0; j < 33; j = j + 1) {
             apmInit[j] = cast<u16>(squash((j - 16) * 128) * 16);
         }
-        loop (local j: int = 0; j < napm1 * 33; j = j + 1) {
-            A1[j] = apmInit[j % 33];
-        }
+        memcpy(cast<*void>(A1), cast<*void>(&apmInit[0]), 66);
+        fillRep(cast<*u8>(A1), 66, cast<long>(napm1) * 66);
         if (fapm2) {
-            loop (local j: int = 0; j < 262144 * 33; j = j + 1) {
-                A2[j] = apmInit[j % 33];
-            }
+            memcpy(cast<*void>(A2), cast<*void>(&apmInit[0]), 66);
+            fillRep(cast<*u8>(A2), 66, 262144 * 66);
         }
         if (fmapm) {
-            loop (local j: int = 0; j < 65536 * 33; j = j + 1) {
-                A3[j] = apmInit[j % 33];
-            }
+            memcpy(cast<*void>(A3), cast<*void>(&apmInit[0]), 66);
+            fillRep(cast<*u8>(A3), 66, 65536 * 66);
         }
         if (fmatch) {
             memset(cast<*void>(MT), 0, 4194304 * 4);

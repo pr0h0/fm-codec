@@ -28,7 +28,7 @@ with neighbour-error contexts. It is lossless.
 | Path | What |
 |---|---|
 | `c/fm4.c` | current format (FM4, levels 0–5; bytes, image, audio, video): C reference and spec |
-| `bpl/fm4_core.bpl`, `bpl/fm4_cli.bpl`, `bpl/fm4_wasm.bpl`, `bpl/fm4wasm.mjs` | FM4 in BPL: core, native CLI, WebAssembly entry, JS host |
+| `bpl/fm4_core.bpl`, `bpl/fm4_cli.bpl`, `bpl/fm4_wasm.bpl`, `bpl/fm4wasm.mjs`, `bpl/fm4worker.mjs` | FM4 in BPL: core, native CLI, WebAssembly entry, JS host and Web Worker |
 | `c/fm3.c` | previous format (FM3, levels 0–5): C reference and spec |
 | `bpl/fm3_core.bpl`, `bpl/fm3_cli.bpl`, `bpl/fm3_wasm.bpl` | FM3 in BPL: shared core, native CLI, WebAssembly entry |
 | `bpl/fm3wasm.mjs` | JS host for `bpl/fm3.wasm` (browser / Node / Bun), same API as `js/fm3core.mjs` |
@@ -70,8 +70,24 @@ size / 64 MB runs of whole frames, coded and decoded in parallel (container `FMV
 the cut depends only on the data, so the file is the same for any thread count. 24 s 270x480 short
 (280 MB raw): 4 segments, +3.0% size, 590 s -> 150 s, decode 607 s -> 153 s; 3 min 320x180 (933 MB):
 13 segments, +4.7%, 2011 s -> 469 s (4 cores, 8 threads). Smaller videos stay one FM4 stream.
-The native BPL build (`bpl/fm4`, same `-t N`) writes and reads the same segmented files; the wasm build
-reads and writes single FM4 streams only.
+The native BPL build (`bpl/fm4`, same `-t N`) and the browser build (`createFm4()` below) write and read
+the same segmented files.
+
+**In the browser** `bpl/fm4wasm.mjs` + `bpl/fm4worker.mjs` + `bpl/fm4.wasm` (serve them side by side):
+
+```js
+import { createFm4 } from "./bpl/fm4wasm.mjs";
+const fm4 = await createFm4(new URL("./bpl/fm4.wasm", import.meta.url), { threads: 4 }); // default min(cores, 4)
+const packed = await fm4.encode(rgb, { level: 4, mode: "video", width: 640, height: 360 }); // or bytes/image/audio
+const back = await fm4.decode(packed);
+```
+
+All coding runs in Web Workers (module workers: Chrome 91+, Firefox 114+, Safari 16.4+), so the page
+stays responsive; video segments are coded one per worker. Each worker needs 300-800 MB of wasm memory
+(about 500 MB for a 64 MB video segment), hence the default of at most 4. Single streams run at about
+half the native speed; only segmented video runs in parallel. `bench/browser/fm4_browser.sh` checks the
+output against `c/fm4` in headless Chromium. `loadFm4Wasm()` is the synchronous single-instance API
+(Node, Bun, inside a worker).
 
 ```bash
 make c bpl4 wasm4 BPL=~/Projects/bpl3/bpl     # BPL needs bpl3 staging 80d04313 or later
