@@ -54,7 +54,7 @@
 
 static int SQ_T[33] = {1, 2, 3, 6, 10, 16, 27, 45, 73, 120, 194, 310, 488, 747, 1101, 1546, 2047,
                        2549, 2994, 3348, 3607, 3785, 3901, 3975, 4022, 4050, 4068, 4079, 4085, 4089, 4092, 4093, 4094};
-static int STRETCH[4096], RECIP[256], LR = 4, OPT_HUGE = 1;
+static int16_t STRETCH[4096]; static int RECIP[256], LR = 4, OPT_HUGE = 1;
 #define OSKIP 4          /* OLS: solve every 4th sample */
 #define OLAM 0.998
 #define OEPS 0.001
@@ -132,14 +132,15 @@ static inline int code_bit(Coder *c, int p12, int bit) {
     return bit;
 }
 /* mixer: 16-bit weights (4096 = 1.0), 32-bit wrapping accumulator */
-static inline int dot16(const int16_t *w, const int16_t *st, int n) {
+/* n is a multiple of 16 (inputs past the real count are 0, so their weights stay 0): fixed-size blocks vectorize fully */
+static inline int dot16(const int16_t *restrict w, const int16_t *restrict st, int n) {
     uint32_t s = 0;
-    for (int k = 0; k < n; k++) s += (uint32_t)(w[k] * st[k]);
+    for (int b = 0; b < n; b += 16) for (int k = b; k < b + 16; k++) s += (uint32_t)(w[k] * st[k]);
     return (int32_t)s >> 12;
 }
-static inline void upd16(int16_t *w, const int16_t *st, int n, int e) {
+static inline void upd16(int16_t *restrict w, const int16_t *restrict st, int n, int e) {
     int el = e * LR;
-    for (int k = 0; k < n; k++) {
+    for (int b = 0; b < n; b += 16) for (int k = b; k < b + 16; k++) {
         int nw = w[k] + ((st[k] * el + (1 << 17)) >> 18);
         w[k] = nw > 32767 ? 32767 : (nw < -32768 ? -32768 : nw);
     }
@@ -163,19 +164,28 @@ static void apm_init(uint16_t *A, int n) {
 typedef struct { int n, cnt; double lam; double m[OLSN][OLSN], b[OLSN], w[OLSN], x[OLSN]; } Ols;
 static double ols_pred(Ols *o) { double s = 0; for (int k = 0; k < o->n; k++) s += o->w[k] * o->x[k]; return s; }
 static void ols_upd(Ols *o, double y) {
-    int n = o->n; double L[OLSN][OLSN], z[OLSN];
+    int n = o->n; double L[OLSN][OLSN], z[OLSN], col[OLSN];
     for (int j = 0; j < n; j++) {
         for (int k = 0; k <= j; k++) o->m[j][k] = o->lam * o->m[j][k] + (1 - o->lam) * o->x[j] * o->x[k];
         o->b[j] = o->lam * o->b[j] + (1 - o->lam) * o->x[j] * y;
     }
     if (++o->cnt < OSKIP) return;
     o->cnt = 0;
-    for (int j = 0; j < n; j++) for (int k = 0; k <= j; k++) {
-        double v = o->m[j][k] + (j == k ? OEPS : 0);
-        for (int t = 0; t < k; t++) v -= L[j][t] * L[k][t];
-        if (j == k) { if (v <= 0) return; L[j][j] = sqrt(v); } else L[j][k] = v / L[k][k];
+    /* Cholesky + forward substitution, column by column. Every element still gets its products subtracted in
+       the same order (t ascending) as the row-by-row form, so the result is bit-identical, but the inner loop
+       has no dependency chain and vectorizes. */
+    for (int j = 0; j < n; j++) { for (int k = 0; k <= j; k++) L[j][k] = o->m[j][k] + (j == k ? OEPS : 0); z[j] = o->b[j]; }
+    for (int t = 0; t < n; t++) {
+        if (L[t][t] <= 0) return;
+        double d = sqrt(L[t][t]), zt = z[t] / d;
+        L[t][t] = d; z[t] = zt;
+        for (int j = t + 1; j < n; j++) col[j] = L[j][t] = L[j][t] / d;
+        for (int j = t + 1; j < n; j++) {
+            double cj = col[j], *restrict row = L[j];
+            for (int k = t + 1; k <= j; k++) row[k] -= cj * col[k];
+            z[j] -= cj * zt;
+        }
     }
-    for (int j = 0; j < n; j++) { double v = o->b[j]; for (int t = 0; t < j; t++) v -= L[j][t] * z[t]; z[j] = v / L[j][j]; }
     for (int j = n - 1; j >= 0; j--) { double v = z[j]; for (int t = j + 1; t < n; t++) v -= L[t][j] * o->w[t]; o->w[j] = v / L[j][j]; }
 }
 static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, uint32_t feat2, int64_t width, uint8_t *data, int64_t L) {
@@ -251,7 +261,7 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, uint32_t f
     int64_t stride = 3 * width, mptr = 0, mlen = 0, mptr2 = 0, mlen2 = 0, linestart = 0, prevline = 0, indent = 0, inind = 1, imptr = 0, imlen = 0, imok = 0, imev = -1;
     uint32_t *IMT = XIM ? calloc((size_t)1 << MBITS, 4) : NULL;
     uint32_t ctx[MAXIN], c4 = 0, c8 = 0, w0 = 0, w1 = 0, w2 = 0, *bk[MAXIN];
-    int16_t st[2 * MAXIN + 4]; int smi[MAXIN];
+    int16_t st[2 * MAXIN + 4] = {0}; int smi[MAXIN]; int nb = (nin + 15) & ~15;   /* mixer input count rounded up to a block */
     uint32_t *rk[MAXIN]; int rb[MAXIN], rq[MAXIN], reb[MAXIN], rmiss[MAXIN];
     uint16_t *RP = calloc(MAXIN * 64, 2); uint8_t *RN = calloc(MAXIN * 64, 1); for (int j = 0; j < MAXIN * 64; j++) RP[j] = 49152;
     int hord = 0, isym = -1, iq = 0, imiss = 0; uint16_t IMP[64]; uint8_t IMN[64] = {0}; for (int j = 0; j < 64; j++) IMP[j] = 49152;
@@ -502,10 +512,10 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, uint32_t f
         int sel1 = img ? act : aud ? act + 16 * ch : (fmsel ? msel : 0);
         uint32_t c0 = 1, node = 1;
         int mmiss = 0, mmiss2 = 0; imiss = 0; int ieb = -1, iqq = 0;
+        uint32_t hk[MAXIN];
         for (int bp = 0; bp < 8; bp++) {
             if (bp == 0 || bp == 4) {   /* hash all contexts, prefetch all buckets, then search */
-                uint32_t hk[MAXIN];
-                for (int k = 0; k < nctx; k++) {
+                if (bp == 0) for (int k = 0; k < nctx; k++) {
                     hk[k] = nib_hash(ctx[k], c0);
                     uint32_t i0 = hk[k] >> (32 - tb[k]);
                     __builtin_prefetch(T[k] + ((size_t)i0 << 4));
@@ -563,15 +573,15 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, uint32_t f
             int16_t *w3 = W3 + ((img ? ch * 256 + (int)c0 : aud ? ((ch * 16 + act) * 8 + bp) + 1024 * (ach & 1) : (int)((c4 & 0xFF) << 3 | bp)) & 2047) * MAXIN;
             int32_t *wf = WF + (int)c0 * 4;
             int16_t *w4 = W4 + (img ? (bp * 3 + ch) * 32 + (np > 9 ? (int)qe(pr[9] - pred, 15) - 49 : 0) : aud ? (bp * 2 + ch) * 64 + aq : (int)((c4 >> 8 & 0xFF) << 3 | bp)) * MAXIN;
-            int d = dot16(w1, st, nin), p1 = clampp(squash(d)), p2 = 0, p3 = 0, p4 = 0, pf = 0, dd[4] = {0, 0, 0, 0}, nm = XM4 ? 4 : 3;
+            int d = dot16(w1, st, nb), p1 = clampp(squash(d)), p2 = 0, p3 = 0, p4 = 0, pf = 0, dd[4] = {d, 0, 0, 0}, nm = XM4 ? 4 : 3;
             if (fmix2) {
-                int d2 = dot16(w2, st, nin);
-                p2 = clampp(squash(d2));
-                d = (d + d2) >> 1;
+                dd[1] = dot16(w2, st, nb);
+                p2 = clampp(squash(dd[1]));
+                d = (d + dd[1]) >> 1;
             }
             if (fmix3) {   /* learned final mixer over the three mixer outputs */
-                dd[0] = dot16(w1, st, nin); dd[1] = dot16(w2, st, nin); dd[2] = dot16(w3, st, nin);
-                if (XM4) { dd[3] = dot16(w4, st, nin); dd[3] = dd[3] < -2047 ? -2047 : (dd[3] > 2047 ? 2047 : dd[3]); p4 = clampp(squash(dd[3])); }
+                dd[2] = dot16(w3, st, nb);
+                if (XM4) { dd[3] = dot16(w4, st, nb); dd[3] = dd[3] < -2047 ? -2047 : (dd[3] > 2047 ? 2047 : dd[3]); p4 = clampp(squash(dd[3])); }
                 for (int k = 0; k < 3; k++) dd[k] = dd[k] < -2047 ? -2047 : (dd[k] > 2047 ? 2047 : dd[k]);
                 p3 = clampp(squash(dd[2]));
                 int64_t df = (int64_t)wf[0] * dd[0] + (int64_t)wf[1] * dd[1] + (int64_t)wf[2] * dd[2] + (int64_t)wf[3] * dd[3];
@@ -593,10 +603,16 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, uint32_t f
             }
             p12 = clampp(p12);
             int bit = code_bit(c, p12, (sym >> (7 - bp)) & 1);
-            upd16(w1, st, nin, (bit << 12) - p1);
+            if (bp == 3) for (int k = 0; k < nctx; k++) {   /* second nibble known: fetch its buckets while this bit's updates run */
+                hk[k] = nib_hash(ctx[k], c0 * 2 + bit);
+                uint32_t i0 = hk[k] >> (32 - tb[k]);
+                __builtin_prefetch(T[k] + ((size_t)i0 << 4));
+                __builtin_prefetch(T[k] + ((size_t)(i0 ^ 1) << 4));
+            }
+            upd16(w1, st, nb, (bit << 12) - p1);
             if (fmix2) {
-                upd16(w2, st, nin, (bit << 12) - p2);
-                if (fmix3) { upd16(w3, st, nin, (bit << 12) - p3); if (XM4) upd16(w4, st, nin, (bit << 12) - p4); { int el = ((bit << 12) - pf) * LR; for (int k = 0; k < nm; k++) { int32_t nw = wf[k] + ((dd[k] * el) >> 14); wf[k] = nw > (1 << 19) - 1 ? (1 << 19) - 1 : (nw < -(1 << 19) ? -(1 << 19) : nw); } } }
+                upd16(w2, st, nb, (bit << 12) - p2);
+                if (fmix3) { upd16(w3, st, nb, (bit << 12) - p3); if (XM4) upd16(w4, st, nb, (bit << 12) - p4); { int el = ((bit << 12) - pf) * LR; for (int k = 0; k < nm; k++) { int32_t nw = wf[k] + ((dd[k] * el) >> 14); wf[k] = nw > (1 << 19) - 1 ? (1 << 19) - 1 : (nw < -(1 << 19) ? -(1 << 19) : nw); } } }
                 apm_upd(A1, ai1, aw1, bit);
                 if (fapm2) apm_upd(A2, ai2, aw2, bit);
                 if (a3used) apm_upd(A3, ai3, aw3, bit);
@@ -818,6 +834,7 @@ static void add_path(const char *path) {
     if (S_ISREG(st.st_mode) || S_ISDIR(st.st_mode)) {   /* a file, or an empty directory (stored as a path ending in "/") */
         const char *name = path;   /* stored name: the path as given, without leading "/", "./", "../" */
         for (;;) { if (*name == '/') name++; else if (!strncmp(name, "./", 2)) name += 2; else if (!strncmp(name, "../", 3)) name += 3; else break; }
+        for (const char *q; (q = strstr(name, "/../")); ) name = q + 4;   /* and nothing up to a ".." inside the path */
         if (strlen(name) > 65535) { fprintf(stderr, "%s: path too long\n", path); exit(1); }
         if (!(nents & (nents + 1))) ents = realloc(ents, (2 * nents + 2) * sizeof(Ent));
         Ent *e = &ents[nents++]; memset(e, 0, sizeof *e);

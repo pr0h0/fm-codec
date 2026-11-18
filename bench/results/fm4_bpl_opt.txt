@@ -92,3 +92,19 @@ Tried and not kept
 Output byte-identical to c/fm4 (native and wasm) and decode round trip in all three directions on
 62 cases: bytes L0-5 (5 inputs incl. empty and 1 byte), image L1-5, audio L1-5 (1 and 2 channels),
 video L1/2/4, plus text_1mb L4 and style_win_library L2/L4.
+
+== 2026-11-18: profile and speed-up (i7-6700, level 4, user seconds, min of 3) ==
+Profile of the C build, text 1 MB (serialized rdtsc sections, about 1100 cycles per bit in total, 21 contexts):
+  bucket lookup (memory) ~20%, counter load + stretch + history map ~15%, mixer dot products ~15%,
+  counter + history-map update ~14%, mixer weight updates ~10%, APM ~10%, byte-level setup ~9%, coder + rest ~7%.
+  No single hot spot after the changes below; cost is about 50 cycles per context per bit.
+Changes (output byte-identical):
+  C: mixer kernels in fixed blocks of 16 (inputs past the real count are 0), each dot product computed once,
+     second nibble's buckets prefetched one bit earlier, 16-bit stretch table, built with clang.
+  C + BPL: least-squares solve column by column (same subtraction order per element, vectorizable).
+                          C before (gcc)   C now (clang)   BPL before   BPL now
+  text 1 MB (ts)               3.42            2.56           2.58        2.60
+  image 640x426                2.17            1.52           1.63        1.58
+  audio mono 0.96 MB           2.61            1.96           2.33        2.04
+  video 2 frames 640x360       3.51            2.72           3.14        3.05
+Tried, no gain in BPL: earlier prefetch, 16-bit stretch table (both within noise, not kept).

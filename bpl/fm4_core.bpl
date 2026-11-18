@@ -358,42 +358,66 @@ frame olsPred(o: *double, n: int) ret double {
 }
 
 # Lm: scratch [40][40] + z[40]. lam: forgetting factor. cnt: samples since the last solve.
+# row[k] = a * row[k] + c * x[k] and row[k] -= c * col[k]: separate functions so the two buffers can be
+# declared non-overlapping, which lets the loops vectorize.
+@[unchecked]
+frame olsDecay(@[noalias] row: *double, @[noalias] x: *double, n: int, a: double, c: double) {
+    loop (local k: int = 0; k < n; k = k + 1) {
+        row[k] = a * row[k] + c * x[k];
+    }
+}
+
+@[unchecked]
+frame olsSub(@[noalias] row: *double, @[noalias] col: *double, lo: int, hi: int, c: double) {
+    loop (local k: int = lo; k <= hi; k = k + 1) {
+        row[k] = row[k] - c * col[k];
+    }
+}
+
 @[unchecked]
 frame olsUpd(o: *double, Lm: *double, n: int, cnt: *int, lam: double, y: double) {
     local oml: double = 1.0 - lam;
+    local col: double[40];
+    local x: *double = &col[0];
     loop (local j: int = 0; j < n; j = j + 1) {
-        loop (local k: int = 0; k <= j; k = k + 1) {
-            o[j * 40 + k] = lam * o[j * 40 + k] + oml * o[1680 + j] * o[1680 + k];
-        }
-        o[1600 + j] = lam * o[1600 + j] + oml * o[1680 + j] * y;
+        col[j] = o[1680 + j];
+    }
+    loop (local j: int = 0; j < n; j = j + 1) {
+        local c: double = oml * x[j];
+        olsDecay(&o[j * 40], x, j + 1, lam, c);
+        o[1600 + j] = lam * o[1600 + j] + c * y;
     }
     cnt[0] = cnt[0] + 1;
     if (cnt[0] < 4) {
         return;
     }
     cnt[0] = 0;
+    # Cholesky + forward substitution, column by column: every element gets its products subtracted in the
+    # same order (t ascending) as the row-by-row form, so the result is bit-identical, and the inner loop
+    # has no dependency chain.
     loop (local j: int = 0; j < n; j = j + 1) {
         loop (local k: int = 0; k <= j; k = k + 1) {
-            local v: double = o[j * 40 + k] + ((j == k) ? 0.001 : 0.0);
-            loop (local t: int = 0; t < k; t = t + 1) {
-                v = v - Lm[j * 40 + t] * Lm[k * 40 + t];
-            }
-            if (j == k) {
-                if (v <= 0.0) {
-                    return;
-                }
-                Lm[j * 40 + j] = sqrt(v);
-            } else {
-                Lm[j * 40 + k] = v / Lm[k * 40 + k];
-            }
+            Lm[j * 40 + k] = o[j * 40 + k] + ((j == k) ? 0.001 : 0.0);
         }
+        Lm[1600 + j] = o[1600 + j];
     }
-    loop (local j: int = 0; j < n; j = j + 1) {
-        local v: double = o[1600 + j];
-        loop (local t: int = 0; t < j; t = t + 1) {
-            v = v - Lm[j * 40 + t] * Lm[1600 + t];
+    loop (local t: int = 0; t < n; t = t + 1) {
+        if (Lm[t * 40 + t] <= 0.0) {
+            return;
         }
-        Lm[1600 + j] = v / Lm[j * 40 + j];
+        local d: double = sqrt(Lm[t * 40 + t]);
+        local zt: double = Lm[1600 + t] / d;
+        Lm[t * 40 + t] = d;
+        Lm[1600 + t] = zt;
+        loop (local j: int = t + 1; j < n; j = j + 1) {
+            col[j] = Lm[j * 40 + t] / d;
+            Lm[j * 40 + t] = col[j];
+        }
+        loop (local j: int = t + 1; j < n; j = j + 1) {
+            local cj: double = col[j];
+            olsSub(&Lm[j * 40], x, t + 1, j, cj);
+            Lm[1600 + j] = Lm[1600 + j] - cj * zt;
+        }
     }
     loop (local j: int = n - 1; j >= 0; j = j - 1) {
         local v: double = Lm[1600 + j];
