@@ -256,8 +256,11 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, uint32_t f
     uint16_t MP[64], MP2[64]; uint8_t MN[64] = {0}, MN2[64] = {0};   /* P(expected bit is right) per length bucket */
     for (int j = 0; j < 64; j++) MP[j] = MP2[j] = 49152;
     uint16_t *IND1 = find ? calloc(256, 2) : NULL, *IND2 = find ? calloc(1 << 22, 2) : NULL;
-    int16_t *err = img ? calloc(L + 1, 2) : NULL;
-    uint8_t *perr = np ? calloc((L + 1) * np, 1) : NULL;
+    /* per-pixel errors are read back at most 2 rows + 2 pixels (6 * 65535 + 6 bytes): ring buffers of 2^19 entries,
+       or the next power of two >= L + 1 for smaller inputs (no effect on output) */
+    int64_t RM = 63; while (RM < L && RM < (1 << 19) - 1) RM = RM * 2 + 1;
+    int16_t *err = img ? calloc(RM + 1, 2) : NULL;
+    uint8_t *perr = np ? calloc((RM + 1) * np, 1) : NULL;
     int64_t stride = 3 * width, mptr = 0, mlen = 0, mptr2 = 0, mlen2 = 0, linestart = 0, prevline = 0, indent = 0, inind = 1, imptr = 0, imlen = 0, imok = 0, imev = -1;
     uint32_t *IMT = XIM ? calloc((size_t)1 << MBITS, 4) : NULL;
     uint32_t ctx[MAXIN], c4 = 0, c8 = 0, w0 = 0, w1 = 0, w2 = 0, *bk[MAXIN];
@@ -439,18 +442,18 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, uint32_t f
                 int64_t num = 0, den = 0;
                 for (int k = 0; k < np; k++) {
                     int s = 1;
-                    if (hasW) s += perr[iW * np + k];
-                    if (hasN) s += perr[iN * np + k];
-                    if (hasN && hasW) s += perr[iNW * np + k];
-                    if (hasNE) s += perr[iNE * np + k];
+                    if (hasW) s += perr[((iW) & RM) * np + k];
+                    if (hasN) s += perr[((iN) & RM) * np + k];
+                    if (hasN && hasW) s += perr[((iNW) & RM) * np + k];
+                    if (hasNE) s += perr[((iNE) & RM) * np + k];
                     int64_t w = fblend1 ? (1LL << 24) / s : (1LL << 24) / ((int64_t)s * s);
                     num += w * pr[k]; den += w;
                 }
                 pred = (int)((num + den / 2) / den);
             }
-            int eW = hasW ? err[iW] : 0, eN = hasN ? err[iN] : 0, eNW = (hasN && hasW) ? err[iNW] : 0;
-            int eNE = hasNE ? err[iNE] : 0, eP2 = ch == 2 ? err[i - 2] : 0;
-            eP = ch ? err[i - 1] : 0;
+            int eW = hasW ? err[(iW) & RM] : 0, eN = hasN ? err[(iN) & RM] : 0, eNW = (hasN && hasW) ? err[(iNW) & RM] : 0;
+            int eNE = hasNE ? err[(iNE) & RM] : 0, eP2 = ch == 2 ? err[(i - 2) & RM] : 0;
+            eP = ch ? err[(i - 1) & RM] : 0;
             act = bitlen(iabs(eW) + iabs(eN) + iabs(eNW) + iabs(eNE));
             if (act > 15) act = 15;
             uint32_t chv = ch, qp = ch ? qe(eP, 12) : 255;
@@ -469,7 +472,7 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, uint32_t f
                 ctx[11] = H(21, chv, qe(Wv - pred, 24) * 256 + qe(Nv - pred, 24), qe(NEv - pred, 24));
             }
             if (fimgx) {
-                int eWW = hasWW ? err[i - 6] : 0, eNN = hasNN ? err[iN - stride] : 0;
+                int eWW = hasWW ? err[(i - 6) & RM] : 0, eNN = hasNN ? err[(iN - stride) & RM] : 0;
                 ctx[12] = H(22, chv, (uint32_t)(Wv >> 3), (uint32_t)(Nv >> 3));
                 ctx[13] = H(23, chv, qe(eWW, 12) * 256 + qe(eNN, 12), 0);
                 ctx[14] = H(24, chv, (uint32_t)(pred >> 3), act);
@@ -697,8 +700,8 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, uint32_t f
             }
         } else {
             if (c->dec) { int s = (v & 1) ? -((v + 1) >> 1) : (v >> 1); data[i] = (uint8_t)(pred + s); }
-            err[i] = (int8_t)(uint8_t)(data[i] - pred);
-            for (int k = 0; k < np; k++) { int ek = iabs(data[i] - pr[k]); perr[i * np + k] = ek > 255 ? 255 : ek; }
+            err[(i) & RM] = (int8_t)(uint8_t)(data[i] - pred);
+            for (int k = 0; k < np; k++) { int ek = iabs(data[i] - pr[k]); perr[((i) & RM) * np + k] = ek > 255 ? 255 : ek; }
             if (imev >= 0 && data[i] != imev) imok = 0;
             if (XOLS && oin) ols_upd(&OL[ch], data[i]);
         }

@@ -609,6 +609,17 @@ frame tableBits(img: bool, feat: uint, bb: int, k: int) ret int {
 
 # bytes run() takes from the arena (every block is rounded up to 64; 4096 covers the rounding)
 # nchan: audio channel count (mode 3)
+# entries of the per-pixel error rings: errors are read back at most 2 rows + 2 pixels (6 * 65535 + 6 bytes),
+# so 2^19 entries, or the next power of two >= L + 1 for smaller inputs (same as c/fm4.c; no effect on output)
+@[unchecked]
+frame ringSize(L: long) ret long {
+    local r: long = 64;
+    loop (r - 1 < L && r < 524288) {
+        r = r * 2;
+    }
+    return r;
+}
+
 frame arenaSize(mode: int, bb: int, feat: uint, feat2: uint, L: long, nchan: long) ret long {
     local img: bool = mode == 2;
     local aud: bool = mode == 3;
@@ -643,9 +654,10 @@ frame arenaSize(mode: int, bb: int, feat: uint, feat2: uint, L: long, nchan: lon
         total = total + 256 * 2 + 4194304 * 2;
     }
     if (img) {
-        total = total + (L + 1) * 2;
+        local rn: long = ringSize(L);
+        total = total + rn * 2;
         if (!hasF(feat, cast<uint>(2097152))) {
-            total = total + (L + 1) * 12;
+            total = total + rn * 12;
         }
         if (hasF(feat2, cast<uint>(128))) {
             total = total + 4194304 * 4;
@@ -773,9 +785,9 @@ frame runChunk(mode: int, bb: int, limit: int, feat: uint, feat2: uint, widthF: 
     local err: *i16 = cast<*i16>(nullptr);
     local perr: *u8 = cast<*u8>(nullptr);
     if (img) {
-        err = cast<*i16>(arenaTake((L + 1) * 2));
+        err = cast<*i16>(arenaTake(ringSize(L) * 2));
         if (np > 0) {
-            perr = arenaTake((L + 1) * npl);
+            perr = arenaTake(ringSize(L) * npl);
         }
     }
     local IMT: *uint = cast<*uint>(nullptr);
@@ -879,9 +891,9 @@ frame runChunk(mode: int, bb: int, limit: int, feat: uint, feat2: uint, widthF: 
             memset(cast<*void>(IND2), 0, 4194304 * 2);
         }
         if (img) {
-            memset(cast<*void>(err), 0, (L + 1) * 2);
+            memset(cast<*void>(err), 0, ringSize(L) * 2);
             if (np > 0) {
-                memset(cast<*void>(perr), 0, (L + 1) * npl);
+                memset(cast<*void>(perr), 0, ringSize(L) * npl);
             }
         }
         if (XIM) {
@@ -951,6 +963,7 @@ frame runChunk(mode: int, bb: int, limit: int, feat: uint, feat2: uint, widthF: 
     local pr: int[12] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
     local dd: int[4] = [0, 0, 0, 0];
     local stride: long = 3 * width;
+    local rmask: long = ringSize(L) - 1;
     local mptr: long = 0;
     local mlen: long = 0;
     local mptr2: long = 0;
@@ -1370,16 +1383,16 @@ frame runChunk(mode: int, bb: int, limit: int, feat: uint, feat2: uint, widthF: 
                     local s: int = 1;
                     local kl: long = cast<long>(k);
                     if (hasW) {
-                        s = s + cast<int>(perr[iW * npl + kl]);
+                        s = s + cast<int>(perr[((iW) & rmask) * npl + kl]);
                     }
                     if (hasN) {
-                        s = s + cast<int>(perr[iN * npl + kl]);
+                        s = s + cast<int>(perr[((iN) & rmask) * npl + kl]);
                     }
                     if (hasN && hasW) {
-                        s = s + cast<int>(perr[iNW * npl + kl]);
+                        s = s + cast<int>(perr[((iNW) & rmask) * npl + kl]);
                     }
                     if (hasNE) {
-                        s = s + cast<int>(perr[iNE * npl + kl]);
+                        s = s + cast<int>(perr[((iNE) & rmask) * npl + kl]);
                     }
                     local w: long = 0;
                     if (fblend1) {
@@ -1392,13 +1405,13 @@ frame runChunk(mode: int, bb: int, limit: int, feat: uint, feat2: uint, widthF: 
                 }
                 pred = cast<int>((num + den / 2) / den);
             }
-            local eW: int = hasW ? cast<int>(err[iW]) : 0;
-            local eN: int = hasN ? cast<int>(err[iN]) : 0;
-            local eNW: int = (hasN && hasW) ? cast<int>(err[iNW]) : 0;
-            local eNE: int = hasNE ? cast<int>(err[iNE]) : 0;
-            local eP2: int = (ch == 2) ? cast<int>(err[i - 2]) : 0;
+            local eW: int = hasW ? cast<int>(err[(iW) & rmask]) : 0;
+            local eN: int = hasN ? cast<int>(err[(iN) & rmask]) : 0;
+            local eNW: int = (hasN && hasW) ? cast<int>(err[(iNW) & rmask]) : 0;
+            local eNE: int = hasNE ? cast<int>(err[(iNE) & rmask]) : 0;
+            local eP2: int = (ch == 2) ? cast<int>(err[(i - 2) & rmask]) : 0;
             if (ch > 0) {
-                eP = cast<int>(err[i - 1]);
+                eP = cast<int>(err[(i - 1) & rmask]);
             }
             act = bitlen10(iabs(eW) + iabs(eN) + iabs(eNW) + iabs(eNE));
             local chv: uint = cast<uint>(ch);
@@ -1422,8 +1435,8 @@ frame runChunk(mode: int, bb: int, limit: int, feat: uint, feat2: uint, widthF: 
                 ctx[11] = hash4(cast<uint>(21), chv, qe(Wv - pred, 24) * cast<uint>(256) + qe(Nv - pred, 24), qe(NEv - pred, 24));
             }
             if (fimgx) {
-                local eWW: int = hasWW ? cast<int>(err[i - 6]) : 0;
-                local eNN: int = hasNN ? cast<int>(err[iN - stride]) : 0;
+                local eWW: int = hasWW ? cast<int>(err[(i - 6) & rmask]) : 0;
+                local eNN: int = hasNN ? cast<int>(err[(iN - stride) & rmask]) : 0;
                 ctx[12] = hash4(cast<uint>(22), chv, cast<uint>(Wv >> 3), cast<uint>(Nv >> 3));
                 ctx[13] = hash4(cast<uint>(23), chv, qe(eWW, 12) * cast<uint>(256) + qe(eNN, 12), z);
                 ctx[14] = hash4(cast<uint>(24), chv, cast<uint>(pred >> 3), cast<uint>(act));
@@ -1975,13 +1988,13 @@ frame runChunk(mode: int, bb: int, limit: int, feat: uint, feat2: uint, widthF: 
                 data[i] = cast<u8>((pred + sd) & 255);
             }
             local di: int = cast<int>(data[i]);
-            err[i] = cast<i16>(sdiff8(di, pred));
+            err[(i) & rmask] = cast<i16>(sdiff8(di, pred));
             loop (local k: int = 0; k < np; k = k + 1) {
                 local ek: int = iabs(di - pr[k]);
                 if (ek > 255) {
                     ek = 255;
                 }
-                perr[i * npl + cast<long>(k)] = cast<u8>(ek);
+                perr[((i) & rmask) * npl + cast<long>(k)] = cast<u8>(ek);
             }
             if (imev >= 0 && di != imev) {
                 imok = false;
