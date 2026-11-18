@@ -30,3 +30,14 @@ motion compensation (16x16 blocks, +-8 full search, vectors not counted):
 larger context tables on 8 MB inputs (bytes, level 4): BB 18 -> 20 -> 22
   tar 1214082 -> 1200585 -> 1196439 (-1.1%, -1.5%); text 884990 -> 876498 -> 873894
   memory 0.36 -> 1.2 -> 4.5 GB; not adopted.
+
+Longer videos (2026-11-18), decoded from H.264 tech shorts to raw RGB24, fm4 level 4 (C, one core each),
+bytes; time = encode wall seconds. All fm4 files decode back bit-exactly.
+                                  raw MB   fm4               x264rgb qp0 veryslow  x265 lossless  FFV1        xz -9e            zstd -19 --long
+ short, 270x480, 719 fr (24 s)    279.5    1,525,755  590 s  3,513,775  8 s       4,264,543      14,699,653  2,301,396  72 s   2,615,255  20 s
+ short, 1080x1920, 60 fr (2 s)    373.2      799,733  782 s  1,069,239  6 s       1,409,851      10,917,343  1,091,068  91 s   1,246,584  11 s
+ long, 320x180, 1800 fr (60 s)    311.0    1,332,224  660 s  2,888,469  7 s       3,023,473      28,541,259  1,709,068  78 s   1,975,811  22 s
+ long, 320x180, 5400 fr (180 s)   933.1    3,356,875 2011 s  7,310,887 27 s       7,734,578      84,156,351  4,293,112 281 s   4,997,401  38 s
+fm4 is 22-34% smaller than the best other tool (xz on three clips, x264 on the full-HD one) at ~0.47 MB/s.
+Memory: full-HD clip 5.75 GB before the error rings (cf65592), 0.66 GB after; 933 MB clip 1.2 GB.
+4 independent segments of the 24 s short in parallel: 1,572,045 bytes (+3.0%), 247 s instead of 590 s.
