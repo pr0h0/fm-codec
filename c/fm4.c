@@ -38,6 +38,8 @@
 #include <sys/stat.h>
 #include <dirent.h>
 #include <errno.h>
+#include <unistd.h>
+#include <sys/wait.h>
 
 #define MAXIN 96
 #define NPRED 12
@@ -784,10 +786,10 @@ static int spit(const char *path, uint8_t *b, int64_t n) {
     FILE *f = fopen(path, "wb"); if (!f) { perror(path); return 1; }
     fwrite(b, 1, n, f); fclose(f); return 0;
 }
-/* ---- archive: "FMA\x01" | stream* ; stream = u64 length | FM4 stream.
-   Stream 0 (bytes mode) is the index followed by the solid data of every file, files sorted by extension.
+/* ---- archive: "FMA\x02" | u32 nsolid | stream* ; stream = u64 length | FM4 stream.
+   The first nsolid streams (bytes mode), decoded and joined, are the index followed by the solid data of every file, files sorted by extension.
    Index: u32 count | per file: u16 path length | path | u32 permissions | u64 size | u64 a | u64 b.
-   For a file with b > 0, bytes [a, a+b) are not in stream 0 but in a stream of their own (next in file order):
+   For a file with b > 0, bytes [a, a+b) are not in the solid data but in a stream of their own (next in file order):
    PCM of a WAV in audio mode, pixels of a BMP/PPM in image mode, or a file that looks already compressed, stored. ---- */
 typedef struct { char *path; uint8_t *d; int64_t size, a, b, width; int mode, perm; } Ent;
 static Ent *ents; static int nents;
@@ -857,11 +859,41 @@ static void detect(Ent *e, int media) {
     }
     e->a = a; e->b = b; e->mode = mode; e->width = w;
 }
-static int archive(int level, int media, const char *out, char **paths, int np) {
+/* Streams are independent, so they are coded in parallel, one forked process each, results in shared memory. */
+typedef struct { int mode, level; int64_t width, L, n; uint8_t *in, *out; pid_t pid; } Job;
+static int run_jobs(Job *jobs, int nj, int threads, int decode) {
+    int next = 0, running = 0, fail = 0, st;
+    for (int i = 0; i < nj; i++) {   /* out: encode = u64 length | stream (at most L + HDR bytes); decode = caller's buffer */
+        if (!decode) jobs[i].out = mmap(NULL, jobs[i].L + HDR + 8, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+        if (jobs[i].out == MAP_FAILED) { perror("mmap"); return 1; }
+    }
+    while (next < nj || running) {
+        if (next < nj && running < threads) {
+            Job *j = &jobs[next++];
+            fflush(NULL);
+            if ((j->pid = fork()) < 0) { perror("fork"); return 1; }
+            if (!j->pid) {
+                int64_t m;
+                if (decode) {
+                    uint8_t *d = fm4_decode(j->in, j->n, &m);
+                    if (!d || m != j->L) _exit(1);
+                    memcpy(j->out, d, m);
+                } else {
+                    uint8_t *o = fm4_encode(j->level, j->mode, j->width, j->in, j->L, &m);
+                    put64(j->out, m); memcpy(j->out + 8, o, m);
+                }
+                _exit(0);
+            }
+            running++;
+        } else { if (wait(&st) < 0 || !WIFEXITED(st) || WEXITSTATUS(st)) fail = 1; running--; }
+    }
+    return fail;
+}
+static int archive(int level, int media, int threads, const char *out, char **paths, int np) {
     for (int i = 0; i < np; i++) add_path(paths[i]);
     qsort(ents, nents, sizeof(Ent), ent_cmp);
-    int64_t n = 4, total = 0;
-    for (int i = 0; i < nents; i++) { Ent *e = &ents[i]; detect(e, media); n += 30 + strlen(e->path) + e->size - e->b; total += e->size; }
+    int64_t n = 4, total = 0; int nown = 0;
+    for (int i = 0; i < nents; i++) { Ent *e = &ents[i]; detect(e, media); n += 30 + strlen(e->path) + e->size - e->b; total += e->size; nown += e->b > 0; }
     uint8_t *s = malloc(n), *p = s;
     for (int i = 0; i < 4; i++) *p++ = (uint32_t)nents >> (8 * i);
     for (int i = 0; i < nents; i++) {
@@ -875,17 +907,19 @@ static int archive(int level, int media, const char *out, char **paths, int np) 
         memcpy(p, e->d, e->a); p += e->a;
         memcpy(p, e->d + e->a + e->b, e->size - e->a - e->b); p += e->size - e->a - e->b;
     }
+    /* the solid data is cut into equal parts of at least PART_MB (default 8 MB), at most one per thread: costs a little size, scales the speed */
+    int64_t part = (getenv("PART_MB") ? atoll(getenv("PART_MB")) : 8) << 20;
+    int nsolid = part > 0 && n / part > 1 ? (n / part < threads ? n / part : threads) : 1, nj = 0;
+    Job *jobs = calloc(nsolid + nown, sizeof(Job));
+    for (int k = 0; k < nsolid; k++) { int64_t lo = n * k / nsolid, hi = n * (k + 1) / nsolid; jobs[nj++] = (Job){1, level, 0, hi - lo, 0, s + lo, NULL, 0}; }
+    for (int i = 0; i < nents; i++) { Ent *e = &ents[i]; if (e->b) jobs[nj++] = (Job){e->mode, e->mode ? level : 0, e->width, e->b, 0, e->d + e->a, NULL, 0}; }
+    if (run_jobs(jobs, nj, threads, 0)) { fprintf(stderr, "compression failed\n"); return 1; }
     FILE *f = fopen(out, "wb"); if (!f) { perror(out); return 1; }
-    int64_t written = 4; uint8_t l8[8];
-    fwrite("FMA\x01", 1, 4, f);
-    for (int i = -1; i < nents; i++) {
-        Ent *e = i < 0 ? NULL : &ents[i]; int64_t m;
-        if (e && !e->b) continue;
-        uint8_t *o = e ? fm4_encode(e->mode ? level : 0, e->mode, e->width, e->d + e->a, e->b, &m) : fm4_encode(level, 1, 0, s, n, &m);
-        fprintf(stderr, "%-6s %12lld -> %12lld  %s\n", !e ? "solid" : e->mode == 3 ? "audio" : e->mode == 2 ? "image" : "stored",
-                (long long)(e ? e->b : n), (long long)m, e ? e->path : "(index and all other data)");
-        put64(l8, m); fwrite(l8, 1, 8, f); fwrite(o, 1, m, f); free(o); written += 8 + m;
-    }
+    int64_t written = 8, k = nsolid; uint8_t n4[4] = {nsolid, nsolid >> 8, nsolid >> 16, nsolid >> 24};
+    fwrite("FMA\x02", 1, 4, f); fwrite(n4, 1, 4, f);
+    for (int i = 0; i < nj; i++) { int64_t m = get64(jobs[i].out); fwrite(jobs[i].out, 1, 8 + m, f); written += 8 + m; }
+    for (int i = 0; i < nsolid; i++) fprintf(stderr, "solid  %12lld -> %12lld  (index and all other data, part %d of %d)\n", (long long)jobs[i].L, (long long)get64(jobs[i].out), i + 1, nsolid);
+    for (int i = 0; i < nents; i++) { Ent *e = &ents[i]; if (e->b) { fprintf(stderr, "%-6s %12lld -> %12lld  %s\n", e->mode == 3 ? "audio" : e->mode == 2 ? "image" : "stored", (long long)e->b, (long long)get64(jobs[k].out), e->path); k++; } }
     if (fclose(f)) { perror(out); return 1; }
     fprintf(stderr, "%d files, %lld -> %lld bytes\n", nents, (long long)total, (long long)written);
     return 0;
@@ -896,20 +930,25 @@ static int bad_path(const char *p) {   /* absolute, empty, or with a ".." compon
         if (!strncmp(s, "..", 2) && (s[2] == '/' || !s[2])) return 1;
     return 0;
 }
-static uint8_t *next_stream(uint8_t *f, int64_t n, int64_t *pos, int64_t *L) {
-    if (n - *pos < 8) return NULL;
-    int64_t m = get64(f + *pos);
-    if (m < 0 || m > n - *pos - 8) return NULL;
-    uint8_t *d = fm4_decode(f + *pos + 8, m, L);
-    *pos += 8 + m;
-    return d;
-}
-static int extract(const char *in, const char *dir) {
-    int64_t n, pos = 4, sn; uint8_t *f = slurp(in, &n);
-    if (n < 4 || memcmp(f, "FMA\x01", 4)) { fprintf(stderr, "not an FMA archive\n"); return 1; }
-    uint8_t *s = next_stream(f, n, &pos, &sn);
-    if (!s || sn < 4) goto bad;
-    int64_t count = get32(s), ip = 4, total = 0;
+static int extract(const char *in, const char *dir, int threads) {
+    int64_t n, sn = 0, all = 0; uint8_t *f = slurp(in, &n);
+    if (n < 8 || memcmp(f, "FMA\x02", 4)) { fprintf(stderr, "not an FMA archive\n"); return 1; }
+    int64_t nsolid = get32(f + 4), nj = 0, cap = 0; Job *jobs = NULL;
+    for (int64_t pos = 8; pos < n; ) {   /* list the streams, then decode them all in parallel into one shared buffer */
+        if (n - pos < 8 + HDR) goto bad;
+        int64_t m = get64(f + pos), L = get64(f + pos + 8 + 16);
+        if (m < HDR || m > n - pos - 8 || L < 0 || L > (int64_t)1 << 40 || all + L < all) goto bad;
+        if (nj == cap) jobs = realloc(jobs, (cap = 2 * cap + 16) * sizeof(Job));
+        jobs[nj] = (Job){0, 0, 0, L, m, f + pos + 8, NULL, 0};
+        if (nj++ < nsolid) sn += L;
+        all += L; pos += 8 + m;
+    }
+    if (nsolid < 1 || nj < nsolid || sn < 4) goto bad;
+    uint8_t *s = mmap(NULL, all, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0), *o = s;
+    if (s == MAP_FAILED) goto bad;
+    for (int64_t i = 0; i < nj; i++) { jobs[i].out = o; o += jobs[i].L; }
+    if (run_jobs(jobs, nj, threads, 1)) goto bad;
+    int64_t count = get32(s), ip = 4, total = 0, k = nsolid;
     for (int64_t i = 0; i < count; i++) {   /* first pass over the index: find where the data starts */
         if (sn - ip < 2 || sn - ip < 30 + rd16(s + ip)) goto bad;
         ip += 30 + rd16(s + ip);
@@ -920,19 +959,19 @@ static int extract(const char *in, const char *dir) {
     for (int64_t i = 0; i < count; i++) {
         int pl = rd16(s + ip); char *name = malloc(strlen(dir) + pl + 2), *rel = name + strlen(dir) + 1;
         sprintf(name, "%s/", dir); memcpy(rel, s + ip + 2, pl); rel[pl] = 0; ip += 2 + pl;
-        int perm = get32(s + ip) & 0777; int64_t size = get64(s + ip + 4), a = get64(s + ip + 12), b = get64(s + ip + 20), bn = 0; ip += 28;
+        int perm = get32(s + ip) & 0777; int64_t size = get64(s + ip + 4), a = get64(s + ip + 12), b = get64(s + ip + 20); ip += 28;
         if ((int64_t)strlen(rel) != pl || bad_path(rel)) { fprintf(stderr, "unsafe path in archive: %s\n", rel); return 1; }
         if (size < 0 || a < 0 || b < 0 || a > size || b > size - a || size - b > s + sn - q) goto bad;
-        uint8_t *own = b ? next_stream(f, n, &pos, &bn) : NULL;
-        if (b && (!own || bn != b)) goto bad;
+        if (b && (k >= nj || jobs[k].L != b)) goto bad;
+        uint8_t *own = b ? jobs[k++].out : NULL;
         for (char *c = rel; (c = strchr(c, '/')); *c++ = '/') { *c = 0; if (mkdir(name, 0777) && errno != EEXIST) { perror(name); return 1; } }
         if (pl && rel[pl - 1] != '/') {
-            FILE *o = fopen(name, "wb"); if (!o) { perror(name); return 1; }
-            fwrite(q, 1, a, o); if (b) fwrite(own, 1, b, o); fwrite(q + a, 1, size - a - b, o);
-            if (fclose(o)) { perror(name); return 1; }
+            FILE *w = fopen(name, "wb"); if (!w) { perror(name); return 1; }
+            fwrite(q, 1, a, w); if (b) fwrite(own, 1, b, w); fwrite(q + a, 1, size - a - b, w);
+            if (fclose(w)) { perror(name); return 1; }
         }
         chmod(name, perm);
-        q += size - b; total += size; free(own); free(name);
+        q += size - b; total += size; free(name);
     }
     fprintf(stderr, "%lld files, %lld bytes\n", (long long)count, (long long)total);
     return 0;
@@ -942,14 +981,18 @@ bad:
 int main(int argc, char **argv) {
     init_tables();
     if (getenv("HUGE")) OPT_HUGE = atoi(getenv("HUGE"));
-    if (argc >= 5 && !strcmp(argv[1], "a")) {   /* fm4 a [-m bytes] LEVEL OUT PATH... */
-        int media = 1, k = 2;
-        if (!strcmp(argv[k], "-m")) { if (!strcmp(argv[k + 1], "bytes")) media = 0; else if (strcmp(argv[k + 1], "auto")) goto usage; k += 2; }
+    if (argc >= 3 && (!strcmp(argv[1], "a") || !strcmp(argv[1], "x"))) {   /* fm4 a [-m auto|bytes] [-t N] LEVEL OUT PATH... | fm4 x [-t N] IN [DIR] */
+        int media = 1, k = 2, threads = sysconf(_SC_NPROCESSORS_ONLN);
+        for (; k + 1 < argc && argv[k][0] == '-'; k += 2) {
+            if (!strcmp(argv[k], "-m") && (!strcmp(argv[k + 1], "bytes") || !strcmp(argv[k + 1], "auto"))) media = argv[k + 1][0] == 'a';
+            else if (!strcmp(argv[k], "-t") && atoi(argv[k + 1]) > 0) threads = atoi(argv[k + 1]);
+            else goto usage;
+        }
+        if (argv[1][0] == 'x') { if (argc - k < 1 || argc - k > 2) goto usage; return extract(argv[k], argc - k == 2 ? argv[k + 1] : ".", threads); }
         if (argc < k + 3 || argv[k][0] < '0' || argv[k][0] > '5' || argv[k][1]) goto usage;
         if (getenv("LR")) LR = atoi(getenv("LR"));
-        return archive(argv[k][0] - '0', media, argv[k + 1], argv + k + 2, argc - k - 2);
+        return archive(argv[k][0] - '0', media, threads, argv[k + 1], argv + k + 2, argc - k - 2);
     }
-    if ((argc == 3 || argc == 4) && !strcmp(argv[1], "x")) return extract(argv[2], argc == 4 ? argv[3] : ".");
     if (argc >= 6 && !strcmp(argv[1], "enc")) {
         int level = atoi(argv[2]), video = !strcmp(argv[3], "video"), mode = !strcmp(argv[3], "image") || video ? 2 : !strcmp(argv[3], "audio") ? 3 : 1;
         int64_t width = mode >= 2 ? atoll(argv[4]) : 0, fheight = video ? atoll(argv[5]) : 0, L, n;
@@ -975,9 +1018,10 @@ usage:
                     "       fm4 enc LEVEL audio CHANNELS IN OUT       raw 16-bit little-endian PCM\n"
                     "       fm4 enc LEVEL video WIDTH HEIGHT IN OUT   raw RGB24 frames\n"
                     "       fm4 dec IN OUT\n"
-                    "       fm4 a [-m auto|bytes] LEVEL OUT PATH...   archive files and directories; auto (default) uses the\n"
-                    "                                                 audio model for WAV and the image model for BMP/PPM, bytes does not\n"
-                    "       fm4 x IN [DIR]                            extract an archive\n"
+                    "       fm4 a [-m auto|bytes] [-t N] LEVEL OUT PATH...   archive files and directories\n"
+                    "             -m auto (default): audio model for WAV, image model for BMP/PPM; -m bytes: neither\n"
+                    "             -t N: processes (default: all cores); data over 16 MB is cut into up to N parts, -t 1 keeps one part\n"
+                    "       fm4 x [-t N] IN [DIR]                            extract an archive\n"
                     "       env FEAT, FEAT2, BB, LR, HUGE for experiments\n");
     return 2;
 }
