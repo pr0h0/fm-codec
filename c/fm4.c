@@ -1,11 +1,17 @@
-/* fm3: model-fraction codec, format FM3. C reference implementation = the spec for the BPL and JS ports.
+/* fm4: model-fraction codec, format FM4. C reference implementation = the spec for the BPL port.
  *
- *   fm4 enc LEVEL(0-5) bytes IN OUT | fm4 enc LEVEL image WIDTH IN OUT (raw RGB24) | fm4 dec IN OUT
- *   experiments: env FEAT (feature bits, overrides the level), BB (log2 buckets/table), LIMIT, LR, HUGE=0
+ *   fm4 enc LEVEL(0-5) bytes IN OUT | enc LEVEL image WIDTH IN OUT | enc LEVEL audio CHANNELS IN OUT
+ *   | enc LEVEL video WIDTH HEIGHT IN OUT | dec IN OUT | a [-m auto|bytes] [-t N] LEVEL OUT PATH... | x [-t N] IN [DIR]
+ *   experiments: env FEAT, FEAT2 (feature bits, override the level), BB (log2 buckets/table), LR, HUGE=0
  *
  * Container (28-byte header, little endian):
- *   "FM4\x01" | mode u8 (0 store, 1 bytes, 2 image) | bb u8 | counter limit u8 | mixer lr u8
- *   | feat u32 | width u32 | L u64 | payload (store: raw bytes; else digits of N: data = model-decode(N/256^k))
+ *   "FM4\x01" | mode u8 (0 store, 1 bytes, 2 image/video, 3 audio) | bb u8 | counter limit u8 | mixer lr u8
+ *   | feat u32 | width u32 | L u64 | feat2 u32 | payload (store: raw bytes; else digits of N: data = model-decode(N/256^k))
+ *   width: image width; audio: channels (1-8); video: width | frame height << 16.
+ *
+ * Feature bits 2 (feat2):
+ *   1 mixer selection by hit count   2 4th mixer   4 text contexts   8 run inputs   16 OLS predictor
+ *   32 wide OLS (audio: 32 own samples)   64 exact-colour contexts   128 2-D match model   256 video (previous frame)
  *
  * Feature bits (feat):
  *   bytes  1 match model (6-byte hash)        2 word contexts                4 mixer-1 set by match length

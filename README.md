@@ -68,7 +68,7 @@ contexts for images; four text contexts, a fourth mixer, mixer selection by cont
 and **video** (raw RGB frames, uses the previous frame).
 
 ```bash
-make c bpl4 wasm4 BPL=~/Projects/bpl3/bpl     # BPL needs a compiler with @[unchecked] (> 0.1.3)
+make c bpl4 wasm4 BPL=~/Projects/bpl3/bpl     # BPL needs bpl3 staging 80d04313 or later
 c/fm4 enc 4 bytes in.txt out.fm4              # levels 0..5
 c/fm4 enc 4 image 2048 in.rgb out.fm4         # raw RGB24, width
 c/fm4 enc 4 audio 2 in.pcm out.fm4            # raw 16-bit little-endian PCM, channels

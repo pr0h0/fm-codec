@@ -1,5 +1,5 @@
 # Builds the C reference, the BPL native CLI and the BPL WebAssembly module.
-# BPL compiler: set BPL=/path/to/bpl (https://github.com/pr0h0/bpl3, needs @[unchecked]: > 0.1.3), needs clang + wasm-ld.
+# BPL compiler: set BPL=/path/to/bpl (https://github.com/pr0h0/bpl3, needs staging 80d04313 or later: @[unchecked], @[noalias], wasm SIMD flags), needs clang + wasm-ld.
 BPL ?= bpl
 CC ?= gcc
 CFLAGS ?= -O3 -march=native -Wall

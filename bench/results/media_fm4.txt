@@ -22,3 +22,11 @@ a9 sax 48k mono          0.383    0.407    -6.0%
 a10 speech (from mp3)    0.364    0.418   -13.0%
 a11 speech (from mp3)    0.333    0.386   -13.6%
 bytes mode on the same clips (no audio model): 0.26-0.66, i.e. 5-60% larger than FLAC
+
+Experiments not adopted (2026-11-18), 4 frames 640x360, level 4:
+motion compensation (16x16 blocks, +-8 full search, vectors not counted):
+  camera v4 576868 -> 548247 (-5.0%; 8x8 blocks -5.4%); v0 0%, v1 0%, v3 0%, v2 +0.6%
+  -> about 4.5% on camera footage after vector cost, nothing elsewhere; not implemented.
+larger context tables on 8 MB inputs (bytes, level 4): BB 18 -> 20 -> 22
+  tar 1214082 -> 1200585 -> 1196439 (-1.1%, -1.5%); text 884990 -> 876498 -> 873894
+  memory 0.36 -> 1.2 -> 4.5 GB; not adopted.
