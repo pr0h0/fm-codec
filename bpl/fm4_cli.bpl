@@ -2,7 +2,7 @@
 # fm4 enc LEVEL audio CHANNELS IN OUT | fm4 enc LEVEL video WIDTH HEIGHT IN OUT | fm4 dec IN OUT
 # fm4 enc|dec -t N ...: processes for segmented video (same FMV format and cut as c/fm4.c).
 import printf, malloc, strcmp, atoi from "std/c.bpl";
-import fm4Encode, fm4Decode, fm4Result, fm4Estimate, fm4SetArena from "./fm4_core.bpl";
+import fm4Encode, fm4Decode, fm4Result, fm4Estimate, fm4SetArena, xalloc, fm4StreamOk from "./fm4_core.bpl";
 
 extern fopen(path: string, mode: string) ret *void;
 extern fread(buffer: *void, size: long, count: long, stream: *void) ret long;
@@ -14,6 +14,7 @@ extern posix_memalign(out: **void, align: long, size: long) ret int;
 extern madvise(p: *void, n: long, advice: int) ret int;
 extern atoll(s: string) ret long;
 extern getenv(name: string) ret string;
+extern atof(s: string) ret double;
 extern sysconf(name: int) ret long;
 extern fork() ret int;
 extern wait(status: *int) ret int;
@@ -46,7 +47,7 @@ frame slurp(path: string, outLen: *long) ret *u8 {
     fseek(f, 0, 2);
     local n: long = ftell(f);
     fseek(f, 0, 0);
-    local b: *u8 = cast<*u8>(malloc(n + 1));
+    local b: *u8 = cast<*u8>(xalloc(n + 1));
     fread(cast<*void>(b), 1, n, f);
     fclose(f);
     *outLen = n;
@@ -91,11 +92,11 @@ frame shared(n: long) ret *u8 {
 # Segmented video: "FMV\x01" | u32 nseg | nseg x (u64 length | FM4 stream), each stream a run of whole
 # frames. Inputs of at least 2 x SEG_MB (default 64 MB) are cut into L / SEG_MB runs; same rule as c/fm4.c.
 frame videoSegments(L: long, fbytes: long) ret long {
-    local seg: long = 64;
+    local mb: double = 64.0;
     if (getenv("SEG_MB") != nullptr) {
-        seg = atoll(getenv("SEG_MB"));
+        mb = atof(getenv("SEG_MB"));
     }
-    seg = seg << 20;
+    local seg: long = cast<long>(mb * 1048576.0);
     local nf: long = L / fbytes;
     local ns: long = 1;
     if (seg > 0) {
@@ -154,9 +155,9 @@ frame runJobs(nj: long, threads: long, decode: bool, mode: int, level: int, widt
 frame encVideoSegments(level: int, width: long, data: *u8, L: long, ns: long, threads: long, out: string) ret int {
     local fbytes: long = 3 * (width & 65535) * (width >> 16);
     local nf: long = L / fbytes;
-    local ins: **u8 = cast<**u8>(malloc(ns * 8));
-    local Ls: *long = cast<*long>(malloc(ns * 8));
-    local outs: **u8 = cast<**u8>(malloc(ns * 8));
+    local ins: **u8 = cast<**u8>(xalloc(ns * 8));
+    local Ls: *long = cast<*long>(xalloc(ns * 8));
+    local outs: **u8 = cast<**u8>(xalloc(ns * 8));
     loop (local k: long = 0; k < ns; k = k + 1) {
         local a: long = nf * k / ns * fbytes;
         local b: long = nf * (k + 1) / ns * fbytes;
@@ -177,7 +178,7 @@ frame encVideoSegments(level: int, width: long, data: *u8, L: long, ns: long, th
         printf("cannot write %s\n", out);
         return 1;
     }
-    local h: *u8 = cast<*u8>(malloc(8));
+    local h: *u8 = cast<*u8>(xalloc(8));
     h[0] = cast<u8>(70);
     h[1] = cast<u8>(77);
     h[2] = cast<u8>(86);
@@ -197,13 +198,13 @@ frame encVideoSegments(level: int, width: long, data: *u8, L: long, ns: long, th
 # Returns the decoded length (output in *outp), or -1 for a corrupt file.
 frame decVideoSegments(f: *u8, n: long, threads: long, outp: **u8) ret long {
     local ns: long = get64(&f[4]) & 4294967295;
-    if (ns > n / 8) {
+    if (ns > (n - 8) / 36) {   # each segment takes at least 8 + 28 bytes
         return -1;
     }
-    local ins: **u8 = cast<**u8>(malloc(ns * 8 + 8));
-    local Ms: *long = cast<*long>(malloc(ns * 8 + 8));
-    local Ls: *long = cast<*long>(malloc(ns * 8 + 8));
-    local outs: **u8 = cast<**u8>(malloc(ns * 8 + 8));
+    local ins: **u8 = cast<**u8>(xalloc(ns * 8 + 8));
+    local Ms: *long = cast<*long>(xalloc(ns * 8 + 8));
+    local Ls: *long = cast<*long>(xalloc(ns * 8 + 8));
+    local outs: **u8 = cast<**u8>(xalloc(ns * 8 + 8));
     local all: long = 0;
     local pos: long = 8;
     loop (local k: long = 0; k < ns; k = k + 1) {
@@ -212,7 +213,7 @@ frame decVideoSegments(f: *u8, n: long, threads: long, outp: **u8) ret long {
         }
         local m: long = get64(&f[pos]);
         local sl: long = get64(&f[pos + 24]);
-        if (m < 28 || m > n - pos - 8 || sl < 0 || sl > 1099511627776) {
+        if (m < 28 || m > n - pos - 8 || !fm4StreamOk(&f[pos + 8], m, sl)) {
             return -1;
         }
         ins[k] = &f[pos + 8];

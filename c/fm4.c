@@ -4,10 +4,14 @@
  *   | enc LEVEL video WIDTH HEIGHT IN OUT | dec IN OUT | a [-m auto|bytes] [-t N] LEVEL OUT PATH... | x [-t N] IN [DIR]
  *   experiments: env FEAT, FEAT2 (feature bits, override the level), BB (log2 buckets/table), LR, HUGE=0
  *
- * Container (28-byte header, little endian):
- *   "FM4\x01" | mode u8 (0 store, 1 bytes, 2 image/video, 3 audio) | bb u8 | counter limit u8 | mixer lr u8
- *   | feat u32 | width u32 | L u64 | feat2 u32 | payload (store: raw bytes; else digits of N: data = model-decode(N/256^k))
+ * Container, format 2 (36-byte header, little endian):
+ *   "FM4\x02" | mode u8 (0 store, 1 bytes, 2 image/video, 3 audio) | bb u8 | counter limit u8 | mixer lr u8
+ *   | feat u32 | width u32 | L u64 | feat2 u32 | CRC-32 of the data u32 | CRC-32 of header bytes 0-31 u32
+ *   | payload (store: raw bytes; else the arithmetic coder's bytes, all of them)
  *   width: image width; audio: channels (1-8); video: width | frame height << 16.
+ *   Format 1 ("FM4\x01", 28 bytes: no CRCs, trailing zero bytes of the payload stripped) is still decoded.
+ *   The version byte changes whenever an existing decoder could not read the new files; decoders keep reading
+ *   every earlier version.
  *
  * Feature bits 2 (feat2):
  *   1 mixer selection by hit count   2 4th mixer   4 text contexts   8 run inputs   16 OLS predictor
@@ -49,8 +53,11 @@
 
 #define MAXIN 96
 #define NPRED 12
-#define HDR 28
+#define HDR 36    /* header size, format 2 (format 1: 28) */
+#define HDR1 28
 #define MBITS 22
+#define BB_MIN 12   /* table bits (log2 buckets per context) a file may use */
+#define BB_MAX 22
 
 static int SQ_T[33] = {1, 2, 3, 6, 10, 16, 27, 45, 73, 120, 194, 310, 488, 747, 1101, 1546, 2047,
                        2549, 2994, 3348, 3607, 3785, 3901, 3975, 4022, 4050, 4068, 4079, 4085, 4089, 4092, 4093, 4094};
@@ -93,6 +100,10 @@ static inline uint32_t qg(int d) {
     return (uint32_t)((d < 0 ? -q : q) + 8);
 }
 
+/* allocation failure ends the process (status 1): it happens on hostile or corrupt sizes, never silently */
+static void *alloc_ok(void *p) { if (!p) { fputs("out of memory\n", stderr); exit(1); } return p; }
+#define xmalloc(n) alloc_ok(malloc(n))
+#define xcalloc(n, k) alloc_ok(calloc(n, k))
 /* big tables on 2 MB huge pages where available (fewer TLB misses; no effect on output) */
 static void *big_alloc(size_t n) {
     void *p = NULL;
@@ -100,7 +111,7 @@ static void *big_alloc(size_t n) {
         if (posix_memalign(&p, 1u << 21, n)) p = NULL;
         else madvise(p, n, MADV_HUGEPAGE);
     }
-    return p ? p : malloc(n);
+    return p ? p : xmalloc(n);
 }
 static inline uint32_t *find_bucket(uint32_t *T, int bb, uint32_t h) {
     uint32_t chk = (h * 0x2545F491u) >> 16;
@@ -115,9 +126,10 @@ static inline uint32_t *find_bucket(uint32_t *T, int bb, uint32_t h) {
     return v;
 }
 
-typedef struct { uint32_t x1, x2, x; uint8_t *buf; int64_t len, pos, cap; int dec; } Coder;
+/* end: decoding stops once pos passes it (format 2: a valid stream is never read past its last byte) */
+typedef struct { uint32_t x1, x2, x; uint8_t *buf; int64_t len, pos, cap; int dec; int64_t end; } Coder;
 static void emit(Coder *c, uint8_t b) {
-    if (c->len == c->cap) { c->cap = c->cap ? c->cap * 2 : 1 << 16; c->buf = realloc(c->buf, c->cap); }
+    if (c->len == c->cap) { c->cap = c->cap ? c->cap * 2 : 1 << 16; c->buf = alloc_ok(realloc(c->buf, c->cap)); }
     c->buf[c->len++] = b;
 }
 static inline int code_bit(Coder *c, int p12, int bit) {
@@ -212,7 +224,7 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, uint32_t f
     int nrun = XRUN ? nctx : 0;
     int nin = nctx * (fhist ? 2 : 1) + nrun + nimm + (fmatch ? 1 : 0) + (fm2nd ? 1 : 0) + 1;   /* + match(es) + bias */
     int np = img && !flite ? 9 + (XOLS ? 1 : 0) + (fvid ? 2 : 0) : 0;
-    Ols *OL = calloc(3, sizeof(Ols)); OL[0].n = 10; OL[1].n = 14; OL[2].n = 15; if (XWIDE) for (int k = 0; k < 3; k++) OL[k].n += 10; int oin = 0;
+    Ols *OL = xcalloc(3, sizeof(Ols)); OL[0].n = 10; OL[1].n = 14; OL[2].n = 15; if (XWIDE) for (int k = 0; k < 3; k++) OL[k].n += 10; int oin = 0;
     for (int k = 0; k < 3; k++) { OL[k].lam = OLAM; if (fvid) OL[k].n += 4; }
 
     /* table size per context: low-cardinality contexts get small, cache-resident tables */
@@ -228,9 +240,9 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, uint32_t f
     if (aud) for (int k = 0; k < nctx; k++) tb[k] = bb < 16 ? bb : 16;
     /* audio: per channel a long OLS (16 or 32 own samples + 4 of the neighbour channel) and a short fast one */
     int an1 = (feat2 & 32 ? 32 : 16), an = an1 + (nchan > 1 ? 4 : 0);
-    Ols *AO = aud ? calloc(2 * nchan, sizeof(Ols)) : NULL;
+    Ols *AO = aud ? xcalloc(2 * nchan, sizeof(Ols)) : NULL;
     for (int k = 0; k < nchan; k++) { AO[k].n = an; AO[k].lam = 0.998; AO[nchan + k].n = 8; AO[nchan + k].lam = 0.99; }
-    int16_t *aerr = aud ? calloc(L / 2 + 1, 2) : NULL;
+    int16_t *aerr = aud ? xcalloc(L / 2 + 1, 2) : NULL;
     int apred = 0, azig = 0, ahi = 0, aq = 0, ach = 0; uint32_t actx[16];
     uint32_t *T[MAXIN];
     for (int k = 0; k < nctx; k++) {
@@ -238,39 +250,39 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, uint32_t f
         T[k] = big_alloc(tsz * 4);
         for (size_t j = 0; j < tsz; j++) T[k][j] = (j & 15) ? (32768 | 1u << 24) : 0;
     }
-    uint32_t *SM = malloc(sizeof(uint32_t) * MAXIN * 256);
+    uint32_t *SM = xmalloc(sizeof(uint32_t) * MAXIN * 256);
     for (int j = 0; j < MAXIN * 256; j++) SM[j] = 32768;
     int32_t winit = 19661 * 6 / nin;
-    int16_t *W1 = malloc(2 * 8 * 256 * MAXIN), *W2 = malloc(2 * 768 * MAXIN), *W3 = malloc(2 * 2048 * MAXIN), *W4 = malloc(2 * 4096 * MAXIN);
-    int32_t *WF = malloc(sizeof(int32_t) * 256 * 4);
+    int16_t *W1 = xmalloc(2 * 8 * 256 * MAXIN), *W2 = xmalloc(2 * 768 * MAXIN), *W3 = xmalloc(2 * 2048 * MAXIN), *W4 = xmalloc(2 * 4096 * MAXIN);
+    int32_t *WF = xmalloc(sizeof(int32_t) * 256 * 4);
     for (int j = 0; j < 8 * 256 * MAXIN; j++) W1[j] = winit >> 4;
     for (int j = 0; j < 768 * MAXIN; j++) W2[j] = winit >> 4;
     for (int j = 0; j < 2048 * MAXIN; j++) W3[j] = winit >> 4;
     for (int j = 0; j < 4096 * MAXIN; j++) W4[j] = winit >> 4;
     for (int j = 0; j < 256 * 4; j++) WF[j] = XM4 ? 16384 : 21845;
     int napm1 = img ? 256 * 16 * 3 : 65536;
-    uint16_t *A1 = malloc(sizeof(uint16_t) * napm1 * 33); apm_init(A1, napm1);
-    uint16_t *A2 = fapm2 ? malloc(sizeof(uint16_t) * (1 << 18) * 33) : NULL; if (fapm2) apm_init(A2, 1 << 18);
-    uint16_t *A3 = fmapm ? malloc(sizeof(uint16_t) * 65536 * 33) : NULL; if (fmapm) apm_init(A3, 65536);
-    uint32_t *MT = fmatch ? calloc((size_t)1 << MBITS, 4) : NULL, *MT2 = fm2nd ? calloc((size_t)1 << MBITS, 4) : NULL;
+    uint16_t *A1 = xmalloc(sizeof(uint16_t) * napm1 * 33); apm_init(A1, napm1);
+    uint16_t *A2 = fapm2 ? xmalloc(sizeof(uint16_t) * (1 << 18) * 33) : NULL; if (fapm2) apm_init(A2, 1 << 18);
+    uint16_t *A3 = fmapm ? xmalloc(sizeof(uint16_t) * 65536 * 33) : NULL; if (fmapm) apm_init(A3, 65536);
+    uint32_t *MT = fmatch ? xcalloc((size_t)1 << MBITS, 4) : NULL, *MT2 = fm2nd ? xcalloc((size_t)1 << MBITS, 4) : NULL;
     uint16_t MP[64], MP2[64]; uint8_t MN[64] = {0}, MN2[64] = {0};   /* P(expected bit is right) per length bucket */
     for (int j = 0; j < 64; j++) MP[j] = MP2[j] = 49152;
-    uint16_t *IND1 = find ? calloc(256, 2) : NULL, *IND2 = find ? calloc(1 << 22, 2) : NULL;
+    uint16_t *IND1 = find ? xcalloc(256, 2) : NULL, *IND2 = find ? xcalloc(1 << 22, 2) : NULL;
     /* per-pixel errors are read back at most 2 rows + 2 pixels (6 * 65535 + 6 bytes): ring buffers of 2^19 entries,
        or the next power of two >= L + 1 for smaller inputs (no effect on output) */
     int64_t RM = 63; while (RM < L && RM < (1 << 19) - 1) RM = RM * 2 + 1;
-    int16_t *err = img ? calloc(RM + 1, 2) : NULL;
-    uint8_t *perr = np ? calloc((RM + 1) * np, 1) : NULL;
+    int16_t *err = img ? xcalloc(RM + 1, 2) : NULL;
+    uint8_t *perr = np ? xcalloc((RM + 1) * np, 1) : NULL;
     int64_t stride = 3 * width, mptr = 0, mlen = 0, mptr2 = 0, mlen2 = 0, linestart = 0, prevline = 0, indent = 0, inind = 1, imptr = 0, imlen = 0, imok = 0, imev = -1;
-    uint32_t *IMT = XIM ? calloc((size_t)1 << MBITS, 4) : NULL;
+    uint32_t *IMT = XIM ? xcalloc((size_t)1 << MBITS, 4) : NULL;
     uint32_t ctx[MAXIN], c4 = 0, c8 = 0, w0 = 0, w1 = 0, w2 = 0, *bk[MAXIN];
     int16_t st[2 * MAXIN + 4] = {0}; int smi[MAXIN]; int nb = (nin + 15) & ~15;   /* mixer input count rounded up to a block */
     uint32_t *rk[MAXIN]; int rb[MAXIN], rq[MAXIN], reb[MAXIN], rmiss[MAXIN];
-    uint16_t *RP = calloc(MAXIN * 64, 2); uint8_t *RN = calloc(MAXIN * 64, 1); for (int j = 0; j < MAXIN * 64; j++) RP[j] = 49152;
+    uint16_t *RP = xcalloc(MAXIN * 64, 2); uint8_t *RN = xcalloc(MAXIN * 64, 1); for (int j = 0; j < MAXIN * 64; j++) RP[j] = 49152;
     int hord = 0, isym = -1, iq = 0, imiss = 0; uint16_t IMP[64]; uint8_t IMN[64] = {0}; for (int j = 0; j < 64; j++) IMP[j] = 49152;
     static const int ORD[8] = {0, 1, 2, 3, 4, 6, 5, 7};
 
-    for (int64_t i = 0; i < L; i++) {
+    for (int64_t i = 0; i < L && c->pos <= c->end; i++) {
         int ch = 0, act = 0, eP = 0, pred = 0, sym = 0, pr[NPRED];
         int mb = -1, lenq = 0, msel = 0, mb2 = -1, lenq2 = 0;
         if (aud) {
@@ -729,10 +741,18 @@ static void e8e9(uint8_t *d, int64_t n, int fwd) {
 }
 static void put32(uint8_t *p, uint32_t v) { for (int i = 0; i < 4; i++) p[i] = v >> (8 * i); }
 static uint32_t get32(const uint8_t *p) { return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24; }
-static void header(uint8_t *h, int mode, int bb, int limit, int lr, uint32_t feat, uint32_t feat2, int64_t width, int64_t L) {
-    memcpy(h, "FM4\x01", 4); h[4] = mode; h[5] = bb; h[6] = limit; h[7] = lr;
+/* CRC-32 (IEEE, as in zlib/PNG) */
+static uint32_t crc32_of(const uint8_t *p, int64_t n) {
+    static uint32_t T[256];
+    if (!T[1]) for (uint32_t i = 0; i < 256; i++) { uint32_t c = i; for (int k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320u ^ (c >> 1) : c >> 1; T[i] = c; }
+    uint32_t c = 0xFFFFFFFFu;
+    for (int64_t i = 0; i < n; i++) c = T[(c ^ p[i]) & 255] ^ (c >> 8);
+    return c ^ 0xFFFFFFFFu;
+}
+static void header(uint8_t *h, int mode, int bb, int limit, int lr, uint32_t feat, uint32_t feat2, int64_t width, int64_t L, uint32_t crc) {
+    memcpy(h, "FM4\x02", 4); h[4] = mode; h[5] = bb; h[6] = limit; h[7] = lr;
     put32(h + 8, feat); put32(h + 12, (uint32_t)width); put32(h + 16, (uint32_t)L); put32(h + 20, (uint32_t)((uint64_t)L >> 32));
-    put32(h + 24, feat2);
+    put32(h + 24, feat2); put32(h + 28, crc); put32(h + 32, crc32_of(h, 32));
 }
 /* Levels (feat, feat2):
  *   bytes 1: orders 1-3 + match                    2: orders 0-4,6, match, words, mixer2/APM, hit-count mixer select
@@ -759,43 +779,60 @@ static uint8_t *fm4_encode(int level, int mode, int64_t width, uint8_t *data, in
     if (getenv("FEAT")) feat = (uint32_t)atoi(getenv("FEAT"));
     if (getenv("FEAT2")) feat2 = (uint32_t)atoi(getenv("FEAT2"));
     if (getenv("BB")) bb = atoi(getenv("BB"));
-    uint8_t *best = NULL; int64_t bestLen = 0;
+    if (bb < BB_MIN || bb > BB_MAX) { fprintf(stderr, "BB must be %d-%d\n", BB_MIN, BB_MAX); exit(1); }
+    uint8_t *best = NULL; int64_t bestLen = 0; uint32_t crc = crc32_of(data, L);
     if (level > 0) {
         feat &= ~64u;
         if (mode == 1 && e8e9_detect(data, L)) { e8e9(data, L, 1); feat |= 64; }
-        Coder c = {0, 0xFFFFFFFFu, 0, NULL, 0, 0, 0, 0};
+        Coder c = {0, 0xFFFFFFFFu, 0, NULL, 0, 0, 0, 0, INT64_MAX};
         for (int i = 0; i < HDR; i++) emit(&c, 0);
         run(&c, mode, bb, limit, feat, feat2, width, data, L);
         for (int i = 3; i >= 0; i--) emit(&c, c.x1 >> (8 * i));
-        while (c.len > HDR && c.buf[c.len - 1] == 0) c.len--;
-        header(c.buf, mode, bb, limit, LR, feat, feat2, width, L);
+        header(c.buf, mode, bb, limit, LR, feat, feat2, width, L, crc);
         best = c.buf; bestLen = c.len;
         if (feat & 64) e8e9(data, L, 0);
     }
     if (!best || bestLen >= L + HDR) {   /* store */
         free(best);
-        best = malloc(L + HDR);
-        header(best, 0, 0, 0, 0, 0, 0, width, L);
+        best = xmalloc(L + HDR);
+        header(best, 0, 0, 0, 0, 0, 0, width, L, crc);
         memcpy(best + HDR, data, L); bestLen = L + HDR;
     }
     *outLen = bestLen;
     return best;
 }
+/* Checks of one FM4 stream (m >= HDR1 bytes at s, decoded length L) that need no decoding: the fixed cap, and for
+   format 2 the header CRC and the L bound. fm4_decode starts with it; containers call it for each stream before
+   adding the lengths up and allocating. */
+static int stream_ok(const uint8_t *s, int64_t m, int64_t L) {
+    if (L < 0 || L > (int64_t)1 << 40) return 0;
+    if (s[3] != 2) return 1;
+    return m >= HDR && get32(s + 32) == crc32_of(s, 32) && (s[4] == 0 ? L <= m - HDR : L / 4096 <= m - HDR);
+}
+/* Format 2 (written): header CRC checked first, L bounded by the payload (no zero bytes are stripped, and every
+   coded bit has p in [1, 4095]/4096 so costs at least log2(4096/4095) bits: at most ~2840 bytes per payload byte;
+   50 MB of zeros: 2838), decoding stops at the end of the payload, and the CRC of the result must match.
+   Format 1 (read only): trailing zero bytes were stripped, so L can only have a fixed cap and nothing is checked. */
 static uint8_t *fm4_decode(uint8_t *f, int64_t n, int64_t *outLen) {
-    if (n < HDR || memcmp(f, "FM4\x01", 4)) return NULL;
+    if (n < HDR1 || memcmp(f, "FM4", 3) || f[3] < 1 || f[3] > 2) return NULL;
+    int v2 = f[3] == 2, hd = v2 ? HDR : HDR1;
     int mode = f[4], bb = f[5], limit = f[6]; uint32_t feat = get32(f + 8), feat2 = get32(f + 24);
     int64_t width = get32(f + 12), L = (int64_t)get32(f + 16) | (int64_t)get32(f + 20) << 32;
+    if (!stream_ok(f, n, L)) return NULL;   /* format 2: header CRC and L bound */
     if (mode > 3 || (mode == 2 && !(width & 0xFFFF)) || (mode == 3 && (width < 1 || width > 8))) return NULL;   /* corrupt header */
-    uint8_t *data = malloc(L ? L : 1);
-    if (!data) return NULL;
-    if (mode == 0) { if (L > n - HDR) { free(data); return NULL; } memcpy(data, f + HDR, L); }
+    if (mode && (bb < BB_MIN || bb > BB_MAX)) return NULL;   /* the encoder never writes others */
+    if (mode == 0 && L > n - hd) return NULL;
+    uint8_t *data = xmalloc(L ? L : 1);
+    if (mode == 0) memcpy(data, f + hd, L);
     else {
         LR = f[7];
-        Coder c = {0, 0xFFFFFFFFu, 0, f + HDR, n - HDR, 0, 0, 1};
+        Coder c = {0, 0xFFFFFFFFu, 0, f + hd, n - hd, 0, 0, 1, v2 ? n - hd : INT64_MAX};
         for (int i = 0; i < 4; i++) c.x = (c.x << 8) | (c.pos < c.len ? c.buf[c.pos] : 0), c.pos++;
         run(&c, mode, bb, limit, feat, feat2, width, data, L);
+        if (c.pos > c.end) { free(data); return NULL; }   /* read past the end: corrupt */
         if (feat & 64) e8e9(data, L, 0);
     }
+    if (v2 && crc32_of(data, L) != get32(f + 28)) { free(data); return NULL; }
     *outLen = L;
     return data;
 }
@@ -803,7 +840,7 @@ static uint8_t *fm4_decode(uint8_t *f, int64_t n, int64_t *outLen) {
 static uint8_t *slurp(const char *path, int64_t *n) {
     FILE *f = fopen(path, "rb"); if (!f) { perror(path); exit(1); }
     fseek(f, 0, SEEK_END); *n = ftell(f); fseek(f, 0, SEEK_SET);
-    uint8_t *b = malloc(*n ? *n : 1);
+    uint8_t *b = xmalloc(*n ? *n : 1);
     if ((int64_t)fread(b, 1, *n, f) != *n) { perror("read"); exit(1); }
     fclose(f); return b;
 }
@@ -849,7 +886,7 @@ static void add_path(const char *path) {
         if (!dir) { perror(path); exit(1); }
         while ((de = readdir(dir))) {
             if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) continue;
-            char *sub = malloc(strlen(path) + strlen(de->d_name) + 2);
+            char *sub = xmalloc(strlen(path) + strlen(de->d_name) + 2);
             sprintf(sub, "%s/%s", path, de->d_name); add_path(sub); free(sub); any = 1;
         }
         closedir(dir);
@@ -857,13 +894,13 @@ static void add_path(const char *path) {
     }
     if (S_ISREG(st.st_mode) || S_ISDIR(st.st_mode)) {   /* a file, or an empty directory (stored as a path ending in "/") */
         /* stored name: the path normalized; ".." above the start is dropped (like tar), so "../x" is stored as "x" */
-        char *name = malloc(strlen(path) + 2); strcpy(name, path);
+        char *name = xmalloc(strlen(path) + 2); strcpy(name, path);
         if (norm_path(name)) fprintf(stderr, "%s: leading \"..\" removed, stored as %s\n", path, *name ? name : ".");
         if (strlen(name) > 65534) { fprintf(stderr, "%s: path too long\n", path); exit(1); }
         if (!(nents & (nents + 1))) ents = realloc(ents, (2 * nents + 2) * sizeof(Ent));
         Ent *e = &ents[nents++]; memset(e, 0, sizeof *e);
         e->perm = st.st_mode & 0777;
-        if (S_ISDIR(st.st_mode)) { if (!*name) { nents--; free(name); return; } if (name[strlen(name) - 1] != '/') strcat(name, "/"); e->path = name; e->d = malloc(1); }
+        if (S_ISDIR(st.st_mode)) { if (!*name) { nents--; free(name); return; } if (name[strlen(name) - 1] != '/') strcat(name, "/"); e->path = name; e->d = xmalloc(1); }
         else if (!*name) { fprintf(stderr, "%s: no file name, skipped\n", path); nents--; free(name); return; }
         else { e->path = name; e->d = slurp(path, &e->size); }
     } else fprintf(stderr, "%s: not a regular file, skipped\n", path);
@@ -942,7 +979,7 @@ static int archive(int level, int media, int threads, const char *out, char **pa
     qsort(ents, nents, sizeof(Ent), ent_cmp);
     int64_t n = 4, total = 0; int nown = 0;
     for (int i = 0; i < nents; i++) { Ent *e = &ents[i]; detect(e, media); n += 30 + strlen(e->path) + e->size - e->b; total += e->size; nown += e->b > 0; }
-    uint8_t *s = malloc(n), *p = s;
+    uint8_t *s = xmalloc(n), *p = s;
     for (int i = 0; i < 4; i++) *p++ = (uint32_t)nents >> (8 * i);
     for (int i = 0; i < nents; i++) {
         Ent *e = &ents[i]; int pl = strlen(e->path);
@@ -958,9 +995,9 @@ static int archive(int level, int media, int threads, const char *out, char **pa
     /* the solid data is cut into n / PART_MB equal parts (default 8 MB, so each is at least that): costs a little
        size, lets encoding and decoding run in parallel. The cut depends only on the data, never on the thread
        count, so the archive is the same on every machine. */
-    int64_t part = (getenv("PART_MB") ? atoll(getenv("PART_MB")) : 8) << 20;
+    int64_t part = (int64_t)((getenv("PART_MB") ? atof(getenv("PART_MB")) : 8) * 1048576);
     int nsolid = part > 0 && n / part > 1 ? (int)(n / part) : 1, nj = 0;
-    Job *jobs = calloc(nsolid + nown, sizeof(Job));
+    Job *jobs = xcalloc(nsolid + nown, sizeof(Job));
     for (int k = 0; k < nsolid; k++) { int64_t lo = n * k / nsolid, hi = n * (k + 1) / nsolid; jobs[nj++] = (Job){1, level, 0, hi - lo, 0, s + lo, NULL, 0}; }
     for (int i = 0; i < nents; i++) { Ent *e = &ents[i]; if (e->b) jobs[nj++] = (Job){e->mode, e->mode ? level : 0, e->width, e->b, 0, e->d + e->a, NULL, 0}; }
     if (run_jobs(jobs, nj, threads, 0)) { fprintf(stderr, "compression failed\n"); return 1; }
@@ -979,10 +1016,10 @@ static int extract(const char *in, const char *dir, int threads) {
     if (n < 8 || memcmp(f, "FMA\x02", 4)) { fprintf(stderr, "not an FMA archive\n"); return 1; }
     int64_t nsolid = get32(f + 4), nj = 0, cap = 0; Job *jobs = NULL;
     for (int64_t pos = 8; pos < n; ) {   /* list the streams, then decode them all in parallel into one shared buffer */
-        if (n - pos < 8 + HDR) goto bad;
+        if (n - pos < 8 + HDR1) goto bad;
         int64_t m = get64(f + pos), L = get64(f + pos + 8 + 16);
-        if (m < HDR || m > n - pos - 8 || L < 0 || L > (int64_t)1 << 40 || all + L < all) goto bad;
-        if (nj == cap) jobs = realloc(jobs, (cap = 2 * cap + 16) * sizeof(Job));
+        if (m < HDR1 || m > n - pos - 8 || !stream_ok(f + pos + 8, m, L) || all + L < all) goto bad;
+        if (nj == cap) jobs = alloc_ok(realloc(jobs, (cap = 2 * cap + 16) * sizeof(Job)));
         jobs[nj] = (Job){0, 0, 0, L, m, f + pos + 8, NULL, 0};
         if (nj++ < nsolid) sn += L;
         all += L; pos += 8 + m;
@@ -1001,7 +1038,7 @@ static int extract(const char *in, const char *dir, int threads) {
     if (mkdir(dir, 0777) && errno != EEXIST) { perror(dir); return 1; }
     /* ponytail: an existing symlink inside the target directory is followed; extract into a fresh directory if the archive is untrusted */
     for (int64_t i = 0; i < count; i++) {
-        int pl = rd16(s + ip); char *name = malloc(strlen(dir) + pl + 2), *rel = name + strlen(dir) + 1;
+        int pl = rd16(s + ip); char *name = xmalloc(strlen(dir) + pl + 2), *rel = name + strlen(dir) + 1;
         sprintf(name, "%s/", dir); memcpy(rel, s + ip + 2, pl); rel[pl] = 0; ip += 2 + pl;
         int perm = get32(s + ip) & 0777; int64_t size = get64(s + ip + 4), a = get64(s + ip + 12), b = get64(s + ip + 20); ip += 28;
         /* the stored name is normalized again here and must stay inside DIR: not absolute, no ".." above the start */
@@ -1028,13 +1065,13 @@ bad:
    Inputs of at least 2 x SEG_MB (default 64 MB) are cut into L / SEG_MB equal runs of frames, so the cut
    depends only on the data; smaller inputs stay one plain FM4 stream. Segments are coded in parallel. */
 static int64_t video_segments(int64_t L, int64_t fbytes) {
-    int64_t seg = (getenv("SEG_MB") ? atoll(getenv("SEG_MB")) : 64) << 20, nf = fbytes ? L / fbytes : 0;
+    int64_t seg = (int64_t)((getenv("SEG_MB") ? atof(getenv("SEG_MB")) : 64) * 1048576), nf = fbytes ? L / fbytes : 0;
     int64_t ns = seg > 0 ? L / seg : 1;
     return ns > nf ? (nf > 0 ? nf : 1) : (ns < 1 ? 1 : ns);
 }
 static int enc_video_segments(int level, int64_t width, uint8_t *data, int64_t L, int64_t ns, int threads, const char *out) {
     int64_t fbytes = 3 * (width & 0xFFFF) * (width >> 16), nf = L / fbytes;
-    Job *jobs = calloc(ns, sizeof(Job));
+    Job *jobs = xcalloc(ns, sizeof(Job));
     for (int64_t k = 0; k < ns; k++) {
         int64_t a = nf * k / ns * fbytes, b = nf * (k + 1) / ns * fbytes;
         jobs[k] = (Job){2, level, width, b - a, 0, data + a, NULL, 0};
@@ -1048,11 +1085,13 @@ static int enc_video_segments(int level, int64_t width, uint8_t *data, int64_t L
     return 0;
 }
 static uint8_t *dec_video_segments(uint8_t *f, int64_t n, int threads, int64_t *outLen) {
-    int64_t ns = get32(f + 4), all = 0, pos = 8; Job *jobs = calloc(ns ? ns : 1, sizeof(Job));
+    int64_t ns = get32(f + 4), all = 0, pos = 8;
+    if (ns > (n - 8) / (8 + HDR1)) return NULL;   /* each segment takes at least 8 + HDR1 bytes */
+    Job *jobs = xcalloc(ns ? ns : 1, sizeof(Job));
     for (int64_t k = 0; k < ns; k++) {
-        if (n - pos < 8 + HDR) return NULL;
+        if (n - pos < 8 + HDR1) return NULL;
         int64_t m = get64(f + pos), L = get64(f + pos + 8 + 16);
-        if (m < HDR || m > n - pos - 8 || L < 0 || L > (int64_t)1 << 40 || all + L < all) return NULL;
+        if (m < HDR1 || m > n - pos - 8 || !stream_ok(f + pos + 8, m, L) || all + L < all) return NULL;
         jobs[k] = (Job){0, 0, 0, L, m, f + pos + 8, NULL, 0};
         all += L; pos += 8 + m;
     }

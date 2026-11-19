@@ -91,6 +91,7 @@ output against `c/fm4` in headless Chromium. `loadFm4Wasm()` is the synchronous 
 
 ```bash
 make c bpl4 wasm4 BPL=~/Projects/bpl3/bpl     # BPL needs bpl3 staging 80d04313 or later
+make test                                     # tests/run.sh: all modes/levels, builds agree, archives, corrupt input
 c/fm4 enc 4 bytes in.txt out.fm4              # levels 0..5
 c/fm4 enc 4 image 2048 in.rgb out.fm4         # raw RGB24, width
 c/fm4 enc 4 audio 2 in.pcm out.fm4            # raw 16-bit little-endian PCM, channels
@@ -101,6 +102,14 @@ c/fm4 a -m bytes 4 out.fma dir                # same, without the audio/image mo
 c/fm4 a -t 1 4 out.fma dir                    # one process (default: all cores); same file for any -t
 c/fm4 x out.fma destdir                       # extract (also parallel)
 ```
+
+**Integrity:** files are format 2 (`FM4\x02`, 36-byte header, described at the top of `c/fm4.c`) with a
+CRC-32 of the header and of the original data. A corrupt file is rejected, never decoded to wrong data: the
+header CRC and a bound of L to about 2840x the payload stop a bad length before anything is allocated
+(also for every stream of an archive or segmented video, before their lengths are added up),
+decoding stops once it reads past the payload, and the data CRC is checked at the end. Format 1 files still
+decode (without those checks). A new format version is introduced only when existing decoders could not
+read the files; decoders keep reading every earlier version.
 
 **Archives** (`FMA`, format described above `archive()` in `c/fm4.c`): all files are sorted by extension
 and compressed as one stream, so small similar files share context. The PCM data of 16-bit WAV files
