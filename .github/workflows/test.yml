@@ -21,6 +21,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+      - run: test "$(uname -m)" = arm64   # the point of this job; fail if the label ever maps to Intel
       - run: make c/fm4 CFLAGS="-O2 -Wall"
       - run: tests/run.sh
   windows:

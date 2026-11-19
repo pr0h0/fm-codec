@@ -1,0 +1,6 @@
+# LF everywhere, also in Windows checkouts: tests/run.sh compares tests/expected.txt byte for byte,
+# and shell scripts must not get CRLF
+* text=auto eol=lf
+*.fm4 binary
+*.fma binary
+*.wasm binary
