@@ -790,9 +790,9 @@ static uint8_t *fm4_decode(uint8_t *f, int64_t n, int64_t *outLen) {
     int mode = f[4], bb = f[5], limit = f[6]; uint32_t feat = get32(f + 8), feat2 = get32(f + 24);
     int64_t width = get32(f + 12), L = (int64_t)get32(f + 16) | (int64_t)get32(f + 20) << 32;
     if (mode > 3 || (mode == 2 && !(width & 0xFFFF)) || (mode == 3 && (width < 1 || width > 8))) return NULL;   /* corrupt header */
-    /* every coded bit has p in [1, 4095]/4096, so it costs at least log2(4096/4095) bits: a stream holds at most
-       ~2840 bytes per payload byte (50 MB of zeros: 2838). A larger L is a corrupt header, not a big allocation. */
-    if (L < 0 || (mode == 0 ? L > n - HDR : L / 4096 > n - HDR + 8)) return NULL;
+    /* No bound from the payload size: trailing zero bytes are stripped and a run of predicted 1-bits codes as
+       zeros, so 100 KB of 0xFF is a header-only file. A fixed cap; a corrupt L that cannot be allocated fails there. */
+    if (L < 0 || L > (int64_t)1 << 40 || (mode == 0 && L > n - HDR)) return NULL;
     uint8_t *data = xmalloc(L ? L : 1);
     if (!data) return NULL;
     if (mode == 0) memcpy(data, f + HDR, L);

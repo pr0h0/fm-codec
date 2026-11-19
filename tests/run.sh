@@ -13,7 +13,7 @@ python3 "$R/tests/gen.py" "$D/in" || exit 1
 fail=0
 bad() { echo "FAIL: $*"; fail=1; }
 hash() { if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -c1-64; else shasum -a 256 "$1" | cut -c1-64; fi; }
-T=; command -v timeout >/dev/null && T="timeout 60"
+T=; if command -v timeout >/dev/null; then T="timeout 60"; elif command -v gtimeout >/dev/null; then T="gtimeout 60"; else echo "warning: no timeout(1); corrupt-input hangs are not detected"; fi
 nb=0; [ -x "$B" ] && nb=1
 nw=0; [ -f "$R/bpl/fm4.wasm" ] && command -v node >/dev/null && nw=1
 echo "builds: C$( [ $nb = 1 ] && echo ', BPL native')$( [ $nw = 1 ] && echo ', wasm')"
@@ -36,6 +36,8 @@ done <<EOF
 text.txt bytes
 bin.dat bytes
 empty.bin bytes
+ff.bin bytes
+text_ff.bin bytes
 one.bin bytes
 random.bin bytes
 img_96.rgb image 96

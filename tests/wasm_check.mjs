@@ -1,8 +1,9 @@
 // node tests/wasm_check.mjs BPLDIR LIST: each line "input c_output level mode [args]"; the wasm build must
 // produce c_output exactly and decode it back to input. Exit status 1 on any mismatch.
 import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 const [dir, list] = process.argv.slice(2);
-const { loadFm4Wasm } = await import(`${dir}/fm4wasm.mjs`);
+const { loadFm4Wasm } = await import(pathToFileURL(`${dir}/fm4wasm.mjs`).href);
 const fm4 = await loadFm4Wasm(readFileSync(`${dir}/fm4.wasm`));
 const eq = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
 let bad = 0;

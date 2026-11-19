@@ -53,6 +53,8 @@ for f in range(NF):
             vid += bytes((250, 40, 40) if sq else ((x * 3 + n) & 255, (y * 4 + n) & 255, 90 + n))
 put("video_64x48.rgb", vid)
 
+put("ff.bin", b"\xff" * 100000)  # codes as zero bytes, which are stripped: a header-only file
+put("text_ff.bin", " ".join(text[:500]).encode() + b"\xff" * 200000)
 put("empty.bin", b"")
 put("one.bin", b"x")
 put("random.bin", bytes(rnd() & 255 for _ in range(5000)))  # incompressible: stored
