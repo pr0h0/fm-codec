@@ -1,0 +1,12 @@
+auto_review: true
+profile: assertive
+approval:
+  mode: approve_or_request_changes
+  max_severity: nit            # approve only when nothing above a nit is open
+  max_merge_risk: high         # format changes are inherently risky; findings are the gate
+  request_changes_on: major
+instructions: |
+  fm-codec is a context-mixing compressor. c/fm4.c is the reference; bpl/fm4_*.bpl (native and wasm,
+  host bpl/fm4wasm.mjs) must produce byte-identical files to it, so any model or format change must be
+  mirrored in both. Decoders read untrusted input: they must never crash, hang or write out of bounds.
+  testdata/ is gitignored (local corpora); tests must not depend on it.
