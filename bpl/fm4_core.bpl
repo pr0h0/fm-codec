@@ -2295,12 +2295,6 @@ frame fm4Decode(f: *u8, n: long) ret long {
     }
     local v2: bool = f[3] == cast<u8>(2);
     local hd: long = v2 ? HDR : HDR1;
-    if (n < hd) {
-        return -1;
-    }
-    if (v2 && get32(ptrAdd(f, 32)) != crc32Of(f, 32)) {
-        return -1;
-    }
     local mode: int = cast<int>(f[4]);
     local bb: int = cast<int>(f[5]);
     local limit: int = cast<int>(f[6]);
@@ -2308,13 +2302,16 @@ frame fm4Decode(f: *u8, n: long) ret long {
     local feat2: uint = get32(ptrAdd(f, 24));
     local width: long = cast<long>(get32(ptrAdd(f, 12)));
     local L: long = cast<long>(get32(ptrAdd(f, 16))) | (cast<long>(get32(ptrAdd(f, 20))) << 32);
+    if (!fm4StreamOk(f, n, L)) {
+        return -1;   # format 2: header CRC and L bound
+    }
     if (mode > 3 || (mode == 2 && (width & 65535) == 0) || (mode == 3 && (width < 1 || width > 8))) {
         return -1;
     }
     if (mode != 0 && (bb < 12 || bb > 22)) {
         return -1;
     }
-    if (L < 0 || L > 1099511627776 || (mode == 0 && L > n - hd) || (v2 && mode != 0 && L / 4096 > n - hd)) {
+    if (mode == 0 && L > n - hd) {
         return -1;
     }
     if (L + 1 > DB_CAP) {
@@ -2360,8 +2357,9 @@ frame fm4Decode(f: *u8, n: long) ret long {
     return L;
 }
 
-# Container check of one FM4 stream (m bytes at s, decoded length L) before L is added up and allocated:
-# for format 2 the header CRC and the L bound, format 1 only the fixed cap (same as stream_ok in c/fm4.c).
+# Checks of one FM4 stream (m >= 28 bytes at s, decoded length L) that need no decoding: the fixed cap, and for
+# format 2 the header CRC and the L bound (stream_ok in c/fm4.c). fm4Decode starts with it; containers call it
+# for each stream before adding the lengths up and allocating.
 @[c_export]
 frame fm4StreamOk(s: *u8, m: long, L: long) ret bool {
     initTables();

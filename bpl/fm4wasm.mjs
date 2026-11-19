@@ -59,15 +59,6 @@ export async function loadFm4Wasm(source) {
   };
 }
 
-// ---- browser API: Web Worker pool and segmented video (FMV, same format and cut as c/fm4.c) ----
-//   const fm4 = await createFm4(new URL("fm4.wasm", import.meta.url), { threads: 4 });
-//   const packed = await fm4.encode(data, { level, mode, width, height, channels });   // Promise<Uint8Array>
-//   const data = await fm4.decode(packed);  fm4.terminate();
-// All coding runs in workers (bpl/fm4worker.mjs), so the page stays responsive. Video of at least
-// 2 x segMB (default 64 MB) is cut into L / segMB runs of whole frames ("FMV\x01" | u32 n | n x (u64 len |
-// FM4 stream)), coded one segment per worker; the file is the same for any thread count. Each worker
-// needs about 500 MB for a 64 MB video segment (600-800 MB for text). Without Worker (Node) it runs
-// inline, one segment after another.
 // CRC-32 (IEEE) and the per-stream check before a segment's length is added up and allocated (stream_ok in c/fm4.c)
 const CRC_T = Uint32Array.from({ length: 256 }, (_, i) => { let c = i; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
 const crc32 = (u8) => { let c = 0xFFFFFFFF; for (const b of u8) c = CRC_T[(c ^ b) & 255] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; };
@@ -78,6 +69,15 @@ const streamOk = (s, L) => {
   return s[4] === 0 ? L <= s.length - 36 : Math.floor(L / 4096) <= s.length - 36;
 };
 
+// ---- browser API: Web Worker pool and segmented video (FMV, same format and cut as c/fm4.c) ----
+//   const fm4 = await createFm4(new URL("fm4.wasm", import.meta.url), { threads: 4 });
+//   const packed = await fm4.encode(data, { level, mode, width, height, channels });   // Promise<Uint8Array>
+//   const data = await fm4.decode(packed);  fm4.terminate();
+// All coding runs in workers (bpl/fm4worker.mjs), so the page stays responsive. Video of at least
+// 2 x segMB (default 64 MB) is cut into L / segMB runs of whole frames ("FMV\x01" | u32 n | n x (u64 len |
+// FM4 stream)), coded one segment per worker; the file is the same for any thread count. Each worker
+// needs about 500 MB for a 64 MB video segment (600-800 MB for text). Without Worker (Node) it runs
+// inline, one segment after another.
 export async function createFm4(source, { threads, workerUrl = new URL("./fm4worker.mjs", import.meta.url) } = {}) {
   if (typeof source === "string" || source instanceof URL) source = await fetch(source);
   const module = source instanceof WebAssembly.Module ? source

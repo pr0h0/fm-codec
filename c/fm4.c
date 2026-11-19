@@ -801,8 +801,9 @@ static uint8_t *fm4_encode(int level, int mode, int64_t width, uint8_t *data, in
     *outLen = bestLen;
     return best;
 }
-/* Container check of one FM4 stream (m bytes at s) before its length is added up and allocated: what
-   fm4_decode checks first, for format 2 the header CRC and the L bound; format 1 only has the fixed cap. */
+/* Checks of one FM4 stream (m >= HDR1 bytes at s, decoded length L) that need no decoding: the fixed cap, and for
+   format 2 the header CRC and the L bound. fm4_decode starts with it; containers call it for each stream before
+   adding the lengths up and allocating. */
 static int stream_ok(const uint8_t *s, int64_t m, int64_t L) {
     if (L < 0 || L > (int64_t)1 << 40) return 0;
     if (s[3] != 2) return 1;
@@ -815,12 +816,12 @@ static int stream_ok(const uint8_t *s, int64_t m, int64_t L) {
 static uint8_t *fm4_decode(uint8_t *f, int64_t n, int64_t *outLen) {
     if (n < HDR1 || memcmp(f, "FM4", 3) || f[3] < 1 || f[3] > 2) return NULL;
     int v2 = f[3] == 2, hd = v2 ? HDR : HDR1;
-    if (n < hd || (v2 && get32(f + 32) != crc32_of(f, 32))) return NULL;
     int mode = f[4], bb = f[5], limit = f[6]; uint32_t feat = get32(f + 8), feat2 = get32(f + 24);
     int64_t width = get32(f + 12), L = (int64_t)get32(f + 16) | (int64_t)get32(f + 20) << 32;
+    if (!stream_ok(f, n, L)) return NULL;   /* format 2: header CRC and L bound */
     if (mode > 3 || (mode == 2 && !(width & 0xFFFF)) || (mode == 3 && (width < 1 || width > 8))) return NULL;   /* corrupt header */
     if (mode && (bb < BB_MIN || bb > BB_MAX)) return NULL;   /* the encoder never writes others */
-    if (L < 0 || L > (int64_t)1 << 40 || (mode == 0 && L > n - hd) || (v2 && mode && L / 4096 > n - hd)) return NULL;
+    if (mode == 0 && L > n - hd) return NULL;
     uint8_t *data = xmalloc(L ? L : 1);
     if (mode == 0) memcpy(data, f + hd, L);
     else {
