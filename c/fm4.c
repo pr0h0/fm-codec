@@ -40,17 +40,31 @@
  *   - mixer: dot = sum((w*st) >> 8) >> 8; w += (st * (err*LR)) >> 14, clamp [-2^19, 2^19-1].
  *   - APM: 33 buckets, interpolated on stretch(p); update nearer bucket by (target - a) >> 6.
  */
+#define __USE_MINGW_ANSI_STDIO 1
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/mman.h>
 #include <math.h>
 #include <sys/stat.h>
 #include <dirent.h>
 #include <errno.h>
+/* Portability: POSIX (Linux, macOS, BSD) codes segments and archive streams in parallel, one forked process
+   each with results in shared memory; Windows (MinGW-w64) has no fork and codes them one after another in
+   the process (same output). */
+#ifdef _WIN32
+#include <direct.h>
+#include <io.h>
+#define NO_FORK 1
+#define mkdir(p, m) _mkdir(p)
+#define lstat stat
+#define fseeko _fseeki64
+#define ftello _ftelli64
+#else
+#include <sys/mman.h>
 #include <unistd.h>
 #include <sys/wait.h>
+#endif
 
 #define MAXIN 96
 #define NPRED 12
@@ -109,10 +123,12 @@ static void *alloc_ok(void *p) { if (!p) { fputs("out of memory\n", stderr); exi
 /* big tables on 2 MB huge pages where available (fewer TLB misses; no effect on output) */
 static void *big_alloc(size_t n) {
     void *p = NULL;
+#if defined(MADV_HUGEPAGE)
     if (OPT_HUGE && n >= (1u << 21)) {
         if (posix_memalign(&p, 1u << 21, n)) p = NULL;
         else madvise(p, n, MADV_HUGEPAGE);
     }
+#endif
     return p ? p : xmalloc(n);
 }
 static inline uint32_t *find_bucket(uint32_t *T, int bb, uint32_t h) {
@@ -869,7 +885,7 @@ static uint8_t *fm4_decode(uint8_t *f, int64_t n, int64_t *outLen) {
 
 static uint8_t *slurp(const char *path, int64_t *n) {
     FILE *f = fopen(path, "rb"); if (!f) { perror(path); exit(1); }
-    fseek(f, 0, SEEK_END); *n = ftell(f); fseek(f, 0, SEEK_SET);
+    fseeko(f, 0, SEEK_END); *n = ftello(f); fseeko(f, 0, SEEK_SET);   /* 64-bit offsets (Windows: long is 32 bits) */
     uint8_t *b = xmalloc(*n ? *n : 1);
     if ((int64_t)fread(b, 1, *n, f) != *n) { perror("read"); exit(1); }
     fclose(f); return b;
@@ -907,6 +923,14 @@ static int norm_path(char *p) {
     *w = 0;
     return up;
 }
+/* log2(x) in 1/65536 units for x >= 1, integer only (libm's log2 may differ in the last bit between platforms) */
+static int64_t log2_q16(uint64_t x) {
+    int e = 63 - __builtin_clzll(x);
+    uint64_t m = e <= 31 ? x << (31 - e) : x >> (e - 31);   /* mantissa in [2^31, 2^32) */
+    int64_t r = (int64_t)e << 16;
+    for (int b = 15; b >= 0; b--) { m = (m * m) >> 31; if (m >= (1ull << 32)) { m >>= 1; r |= (int64_t)1 << b; } }
+    return r;
+}
 static void add_path(const char *path) {
     struct stat st;
     if (lstat(path, &st)) { perror(path); exit(1); }
@@ -924,6 +948,9 @@ static void add_path(const char *path) {
     if (S_ISREG(st.st_mode) || S_ISDIR(st.st_mode)) {   /* a file, or an empty directory (stored as a path ending in "/") */
         /* stored name: the path normalized; ".." above the start is dropped (like tar), so "../x" is stored as "x" */
         char *name = xmalloc(strlen(path) + 2); strcpy(name, path);
+#ifdef _WIN32
+        for (char *c = name; *c; c++) if (*c == '\\') *c = '/';   /* stored names always use '/' */
+#endif
         if (norm_path(name)) fprintf(stderr, "%s: leading \"..\" removed, stored as %s\n", path, *name ? name : ".");
         if (strlen(name) > 65534) { fprintf(stderr, "%s: path too long\n", path); exit(1); }
         if (!(nents & (nents + 1))) ents = realloc(ents, (2 * nents + 2) * sizeof(Ent));
@@ -966,41 +993,57 @@ static void detect(Ent *e, int media) {
     }
     if (b < 4096) { a = b = 0; mode = 0; }
     if (!mode && n >= 1024) {   /* already compressed? (byte entropy above 7.8 bits) -> store, do not spend time on it */
-        int64_t cnt[256] = {0}; double h = 0;
+        int64_t cnt[256] = {0}, h = 0;   /* h = n * entropy in 1/65536 bits, integer only: same on every platform */
         for (int64_t i = 0; i < n; i++) cnt[d[i]]++;
-        for (int i = 0; i < 256; i++) if (cnt[i]) h -= (double)cnt[i] / n * log2((double)cnt[i] / n);
-        if (h > 7.8) b = n;
+        for (int i = 0; i < 256; i++) if (cnt[i]) h += cnt[i] * (log2_q16(n) - log2_q16(cnt[i]));
+        if (h * 5 > n * 2555904) b = n;   /* 7.8 bits: 7.8 * 65536 * 5 = 2555904 */
     }
     e->a = a; e->b = b; e->mode = mode; e->width = w;
 }
+/* memory the coding processes write their results into (shared with them; Windows: plain memory) */
+static uint8_t *shared_alloc(int64_t n) {
+#ifdef NO_FORK
+    return malloc(n ? n : 1);
+#else
+    void *p = mmap(NULL, n ? n : 1, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    return p == MAP_FAILED ? NULL : p;
+#endif
+}
 /* Streams are independent, so they are coded in parallel, one forked process each, results in shared memory. */
-typedef struct { int mode, level; int64_t width, L, n; uint8_t *in, *out; pid_t pid; } Job;
-static int run_jobs(Job *jobs, int nj, int threads, int decode) {
-    int next = 0, running = 0, fail = 0, st;
-    for (int i = 0; i < nj; i++) {   /* out: encode = u64 length | stream (at most L + HDR bytes); decode = caller's buffer */
-        if (!decode) jobs[i].out = mmap(NULL, jobs[i].L + HDR + 8, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-        if (jobs[i].out == MAP_FAILED) { perror("mmap"); return 1; }
+typedef struct { int mode, level; int64_t width, L, n; uint8_t *in, *out; long pid; } Job;
+static int do_job(Job *j, int decode) {   /* 0 on success */
+    int64_t m;
+    if (decode) {
+        uint8_t *d = fm4_decode(j->in, j->n, &m);
+        if (!d || m != j->L) { free(d); return 1; }
+        memcpy(j->out, d, m); free(d);
+    } else {
+        uint8_t *o = fm4_encode(j->level, j->mode, j->width, j->in, j->L, &m);
+        put64(j->out, m); memcpy(j->out + 8, o, m); free(o);
     }
+    return 0;
+}
+static int run_jobs(Job *jobs, int nj, int threads, int decode) {
+    int fail = 0;
+    for (int i = 0; i < nj; i++) {   /* out: encode = u64 length | stream (at most L + HDR bytes); decode = caller's buffer */
+        if (!decode) jobs[i].out = shared_alloc(jobs[i].L + HDR + 8);
+        if (!jobs[i].out) { perror("mmap"); return 1; }
+    }
+#ifdef NO_FORK
+    (void)threads;
+    for (int i = 0; i < nj; i++) fail |= do_job(&jobs[i], decode);
+#else
+    int next = 0, running = 0, st;
     while (next < nj || running) {
         if (next < nj && running < threads) {
             Job *j = &jobs[next++];
             fflush(NULL);
             if ((j->pid = fork()) < 0) { perror("fork"); return 1; }
-            if (!j->pid) {
-                int64_t m;
-                if (decode) {
-                    uint8_t *d = fm4_decode(j->in, j->n, &m);
-                    if (!d || m != j->L) _exit(1);
-                    memcpy(j->out, d, m);
-                } else {
-                    uint8_t *o = fm4_encode(j->level, j->mode, j->width, j->in, j->L, &m);
-                    put64(j->out, m); memcpy(j->out + 8, o, m);
-                }
-                _exit(0);
-            }
+            if (!j->pid) _exit(do_job(j, decode));
             running++;
         } else { if (wait(&st) < 0 || !WIFEXITED(st) || WEXITSTATUS(st)) fail = 1; running--; }
     }
+#endif
     return fail;
 }
 static int archive(int level, int media, int threads, const char *out, char **paths, int np) {
@@ -1054,8 +1097,8 @@ static int extract(const char *in, const char *dir, int threads) {
         all += L; pos += 8 + m;
     }
     if (nsolid < 1 || nj < nsolid || sn < 4) goto bad;
-    uint8_t *s = mmap(NULL, all, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0), *o = s;
-    if (s == MAP_FAILED) goto bad;
+    uint8_t *s = shared_alloc(all), *o = s;
+    if (!s) goto bad;
     for (int64_t i = 0; i < nj; i++) { jobs[i].out = o; o += jobs[i].L; }
     if (run_jobs(jobs, nj, threads, 1)) goto bad;
     int64_t count = get32(s), ip = 4, total = 0, k = nsolid;
@@ -1125,17 +1168,25 @@ static uint8_t *dec_video_segments(uint8_t *f, int64_t n, int threads, int64_t *
         all += L; pos += 8 + m;
     }
     if (pos != n) return NULL;
-    uint8_t *d = mmap(NULL, all ? all : 1, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0), *o = d;
-    if (d == MAP_FAILED) return NULL;
+    uint8_t *d = shared_alloc(all), *o = d;
+    if (!d) return NULL;
     for (int64_t k = 0; k < ns; k++) { jobs[k].out = o; o += jobs[k].L; }
     if (run_jobs(jobs, ns, threads, 1)) return NULL;
     *outLen = all; return d;
+}
+static int ncpu(void) {
+#ifdef NO_FORK
+    return 1;
+#else
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    return n > 0 ? (int)n : 1;
+#endif
 }
 int main(int argc, char **argv) {
     init_tables();
     if (getenv("HUGE")) OPT_HUGE = atoi(getenv("HUGE"));
     if (argc >= 3 && (!strcmp(argv[1], "a") || !strcmp(argv[1], "x"))) {   /* fm4 a [-m auto|bytes] [-t N] LEVEL OUT PATH... | fm4 x [-t N] IN [DIR] */
-        int media = 1, k = 2, threads = sysconf(_SC_NPROCESSORS_ONLN);
+        int media = 1, k = 2, threads = ncpu();
         for (; k + 1 < argc && argv[k][0] == '-'; k += 2) {
             if (!strcmp(argv[k], "-m") && (!strcmp(argv[k + 1], "bytes") || !strcmp(argv[k + 1], "auto"))) media = argv[k + 1][0] == 'a';
             else if (!strcmp(argv[k], "-t") && atoi(argv[k + 1]) > 0) threads = atoi(argv[k + 1]);
@@ -1146,7 +1197,7 @@ int main(int argc, char **argv) {
         if (getenv("LR") && ((LR = atoi(getenv("LR"))) < 1 || LR > 15)) { fprintf(stderr, "LR must be 1-15\n"); return 2; }
         return archive(argv[k][0] - '0', media, threads, argv[k + 1], argv + k + 2, argc - k - 2);
     }
-    int threads = sysconf(_SC_NPROCESSORS_ONLN);
+    int threads = ncpu();
     if (argc >= 4 && (!strcmp(argv[1], "enc") || !strcmp(argv[1], "dec")) && !strcmp(argv[2], "-t")) {   /* fm4 enc|dec -t N ... */
         if ((threads = atoi(argv[3])) < 1) goto usage;
         memmove(argv + 2, argv + 4, (argc - 3) * sizeof *argv); argc -= 2;

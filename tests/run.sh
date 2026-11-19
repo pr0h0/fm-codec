@@ -100,7 +100,8 @@ chmod 750 "$D/tree/sub/bin.dat"
 (cd "$D" && PART_MB=0.02 $C a -t 1 4 a1.fma tree && PART_MB=0.02 $C a -t 3 4 a3.fma tree) >/dev/null 2>&1 || bad "archive"
 cmp -s "$D/a1.fma" "$D/a3.fma" || bad "archive depends on thread count"
 mkdir "$D/x" && $C x "$D/a1.fma" "$D/x" >/dev/null 2>&1 && diff -r "$D/tree" "$D/x/tree" >/dev/null || bad "archive round trip"
-[ "$(ls -l "$D/x/tree/sub/bin.dat" | cut -c1-10)" = "-rwxr-x---" ] || bad "archive permissions"
+case $(uname -s) in MINGW*|MSYS*|CYGWIN*) ;;   # Windows has no Unix permission bits
+*) [ "$(ls -l "$D/x/tree/sub/bin.dat" | cut -c1-10)" = "-rwxr-x---" ] || bad "archive permissions";; esac
 mkdir "$D/x2" && (cd "$D/x2" && $C x "$D/a1.fma" >/dev/null 2>&1) && diff -r "$D/tree" "$D/x2/tree" >/dev/null || bad "extract to ."
 
 # ---- corrupt input ----

@@ -106,6 +106,12 @@ c/fm4 a -t 1 4 out.fma dir                    # one process (default: all cores)
 c/fm4 x out.fma destdir                       # extract (also parallel)
 ```
 
+**Platforms:** `c/fm4.c` builds on Linux, macOS and Windows (MinGW-w64, e.g. MSYS2 UCRT64:
+`make c/fm4 CC=gcc`); CI runs the test suite on Linux x86-64, macOS arm64 and Windows, and the locked output
+hashes must match on all three (the model uses IEEE double arithmetic without FMA contraction and no libm
+functions besides `sqrt`). On Windows segments and archive streams are coded one after another (no `fork`);
+the output is the same.
+
 **Integrity:** files are format 2 (`FM4\x02`, 36-byte header, described at the top of `c/fm4.c`) with a
 CRC-32 of the header and of the original data. A corrupt file is rejected, never decoded to wrong data: the
 header CRC and a bound of L to about 2840x the payload stop a bad length before anything is allocated
