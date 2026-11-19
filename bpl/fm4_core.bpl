@@ -11,6 +11,7 @@
 import malloc, free, memset, memcpy from "std/c.bpl";
 import sqrt, floor, prefetch from "std/intrinsics.bpl";
 extern exit(code: int);
+extern puts(s: string) ret int;
 
 global HDR: long = 28;
 
@@ -19,6 +20,9 @@ global HDR: long = 28;
 frame xalloc(n: long) ret *u8 {
     local p: *u8 = cast<*u8>(malloc(n));
     if (p == nullptr) {
+        if (!__TARGET_WASM__) {
+            puts("out of memory");   # the wasm runtime has no output; the trap reaches the host as an exception
+        }
         exit(1);
     }
     return p;

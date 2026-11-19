@@ -94,9 +94,9 @@ static inline uint32_t qg(int d) {
 }
 
 /* allocation failure ends the process (status 1): it happens on hostile or corrupt sizes, never silently */
-static void *chk(void *p) { if (!p) { fputs("out of memory\n", stderr); exit(1); } return p; }
-#define xmalloc(n) chk(malloc(n))
-#define xcalloc(n, k) chk(calloc(n, k))
+static void *alloc_ok(void *p) { if (!p) { fputs("out of memory\n", stderr); exit(1); } return p; }
+#define xmalloc(n) alloc_ok(malloc(n))
+#define xcalloc(n, k) alloc_ok(calloc(n, k))
 /* big tables on 2 MB huge pages where available (fewer TLB misses; no effect on output) */
 static void *big_alloc(size_t n) {
     void *p = NULL;
@@ -794,7 +794,6 @@ static uint8_t *fm4_decode(uint8_t *f, int64_t n, int64_t *outLen) {
        zeros, so 100 KB of 0xFF is a header-only file. A fixed cap; a corrupt L that cannot be allocated fails there. */
     if (L < 0 || L > (int64_t)1 << 40 || (mode == 0 && L > n - HDR)) return NULL;
     uint8_t *data = xmalloc(L ? L : 1);
-    if (!data) return NULL;
     if (mode == 0) memcpy(data, f + HDR, L);
     else {
         LR = f[7];
