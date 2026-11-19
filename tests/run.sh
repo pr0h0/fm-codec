@@ -80,6 +80,19 @@ for h in "$R"/tests/hostile/*.fm4; do
     done
 done
 
+# archives whose stored names are ordinary file names on POSIX but not on Windows, where they must be refused:
+# t/..\..\escape.txt ('\' is a separator there: it would land next to the target directory) and t/a:stream
+# (':' is a drive or an alternate data stream)
+for t in "backslash_path ..\\..\\escape.txt" "colon_path a:stream"; do
+    set -- $t; rm -rf "$D/bx"; mkdir -p "$D/bx/in"
+    case $(uname -s) in
+    MINGW*|MSYS*|CYGWIN*)
+        $C x "$R/tests/hostile/$1.fma" "$D/bx/in" >/dev/null 2>&1; rc=$?
+        [ $rc = 1 ] && [ ! -e "$D/bx/escape.txt" ] && [ -z "$(ls -A "$D/bx/in")" ] || bad "Windows: $1.fma was not refused (exit $rc)";;
+    *)  $C x "$R/tests/hostile/$1.fma" "$D/bx/in" >/dev/null 2>&1 && [ -f "$D/bx/in/t/$2" ] || bad "extract $1.fma (an ordinary name on POSIX)";;
+    esac
+done
+
 # ---- segmented video: same file for any thread count and build ----
 v=$D/in/video_64x48.rgb
 SEG_MB=0.05 $C enc -t 1 4 video 64 48 "$v" "$D/s1" && SEG_MB=0.05 $C enc -t 3 4 video 64 48 "$v" "$D/s3" || bad "C segmented enc"
@@ -100,7 +113,8 @@ chmod 750 "$D/tree/sub/bin.dat"
 (cd "$D" && PART_MB=0.02 $C a -t 1 4 a1.fma tree && PART_MB=0.02 $C a -t 3 4 a3.fma tree) >/dev/null 2>&1 || bad "archive"
 cmp -s "$D/a1.fma" "$D/a3.fma" || bad "archive depends on thread count"
 mkdir "$D/x" && $C x "$D/a1.fma" "$D/x" >/dev/null 2>&1 && diff -r "$D/tree" "$D/x/tree" >/dev/null || bad "archive round trip"
-[ "$(ls -l "$D/x/tree/sub/bin.dat" | cut -c1-10)" = "-rwxr-x---" ] || bad "archive permissions"
+case $(uname -s) in MINGW*|MSYS*|CYGWIN*) ;;   # Windows has no Unix permission bits
+*) [ "$(ls -l "$D/x/tree/sub/bin.dat" | cut -c1-10)" = "-rwxr-x---" ] || bad "archive permissions";; esac
 mkdir "$D/x2" && (cd "$D/x2" && $C x "$D/a1.fma" >/dev/null 2>&1) && diff -r "$D/tree" "$D/x2/tree" >/dev/null || bad "extract to ."
 
 # ---- corrupt input ----
