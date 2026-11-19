@@ -4,7 +4,11 @@ import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 const [dir, list] = process.argv.slice(2);
 const { loadFm4Wasm } = await import(pathToFileURL(`${dir}/fm4wasm.mjs`).href);
-const fm4 = await loadFm4Wasm(readFileSync(`${dir}/fm4.wasm`));
+const wasm = readFileSync(`${dir}/fm4.wasm`);
+// hosts instantiate with an empty import object (bpl/fm4wasm.mjs), so the module must import nothing
+const imports = WebAssembly.Module.imports(new WebAssembly.Module(wasm));
+if (imports.length) { console.log(`FAIL: fm4.wasm imports ${imports.map((i) => `${i.module}.${i.name}`).join(", ")}`); process.exit(1); }
+const fm4 = await loadFm4Wasm(wasm);
 const eq = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
 let bad = 0;
 for (const line of readFileSync(list, "utf8").trim().split("\n")) {
