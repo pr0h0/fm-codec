@@ -58,6 +58,8 @@
 #define NO_FORK 1
 #define mkdir(p, m) _mkdir(p)
 #define lstat stat
+__declspec(dllimport) unsigned long __stdcall GetFileAttributesA(const char *path);   /* <windows.h> */
+#define REPARSE_POINT 0x400ul   /* FILE_ATTRIBUTE_REPARSE_POINT: symlink or junction */
 #define fseeko _fseeki64
 #define ftello _ftelli64
 #else
@@ -932,6 +934,11 @@ static int64_t log2_q16(uint64_t x) {
     return r;
 }
 static void add_path(const char *path) {
+#ifdef _WIN32
+    /* stat follows symlinks and junctions; skip them as lstat does on POSIX (a junction to a parent would recurse) */
+    unsigned long at = GetFileAttributesA(path);
+    if (at != 0xFFFFFFFFul && (at & REPARSE_POINT)) { fprintf(stderr, "%s: not a regular file, skipped\n", path); return; }
+#endif
     struct stat st;
     if (lstat(path, &st)) { perror(path); exit(1); }
     if (S_ISDIR(st.st_mode)) {
@@ -1027,7 +1034,7 @@ static int run_jobs(Job *jobs, int nj, int threads, int decode) {
     int fail = 0;
     for (int i = 0; i < nj; i++) {   /* out: encode = u64 length | stream (at most L + HDR bytes); decode = caller's buffer */
         if (!decode) jobs[i].out = shared_alloc(jobs[i].L + HDR + 8);
-        if (!jobs[i].out) { perror("mmap"); return 1; }
+        if (!jobs[i].out) { fputs("out of memory\n", stderr); return 1; }
     }
 #ifdef NO_FORK
     (void)threads;
@@ -1114,6 +1121,10 @@ static int extract(const char *in, const char *dir, int threads) {
         sprintf(name, "%s/", dir); memcpy(rel, s + ip + 2, pl); rel[pl] = 0; ip += 2 + pl;
         int perm = get32(s + ip) & 0777; int64_t size = get64(s + ip + 4), a = get64(s + ip + 12), b = get64(s + ip + 20); ip += 28;
         /* the stored name is normalized again here and must stay inside DIR: not absolute, no ".." above the start */
+#ifdef _WIN32
+        /* '\\' is a separator there and ':' a drive or stream: either could leave DIR (archives store '/' only) */
+        if (strpbrk(rel, "\\:")) { fprintf(stderr, "unsafe path in archive: %.*s\n", pl, s + ip - 28 - pl); return 1; }
+#endif
         if ((int64_t)strlen(rel) != pl || rel[0] == '/' || norm_path(rel) || !*rel) { fprintf(stderr, "unsafe path in archive: %.*s\n", pl, s + ip - 28 - pl); return 1; }
         pl = strlen(rel);
         if (size < 0 || a < 0 || b < 0 || a > size || b > size - a || size - b > s + sn - q) goto bad;

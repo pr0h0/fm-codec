@@ -1,3 +1,4 @@
 Files that crashed or misled a decoder before a fix (each must now be rejected with exit status 1):
   feat2_all_bits.fm4       feature bits no level produces: the mixer indexed past its weights (heap overflow)
   audio_partial_frame.fm4  audio length not a whole number of frames: the last byte was never written
+  backslash_path.fma       (Windows) a stored name with '\': a separator there, so it could leave the target directory

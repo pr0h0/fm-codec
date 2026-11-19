@@ -80,6 +80,16 @@ for h in "$R"/tests/hostile/*.fm4; do
     done
 done
 
+# an archive whose stored name is t/..\escape.txt: an ordinary file name on POSIX, but on Windows '\' is a
+# separator, so extraction there must refuse it rather than write escape.txt outside the target directory
+mkdir -p "$D/bx/in"
+case $(uname -s) in
+MINGW*|MSYS*|CYGWIN*)
+    $C x "$R/tests/hostile/backslash_path.fma" "$D/bx/in" >/dev/null 2>&1; rc=$?
+    [ $rc = 1 ] && [ ! -e "$D/bx/escape.txt" ] || bad "Windows: an archive name with '\\' was not refused (exit $rc)";;
+*)  $C x "$R/tests/hostile/backslash_path.fma" "$D/bx/in" >/dev/null 2>&1 && [ -f "$D/bx/in/t/..\escape.txt" ] || bad "extract a name with a backslash";;
+esac
+
 # ---- segmented video: same file for any thread count and build ----
 v=$D/in/video_64x48.rgb
 SEG_MB=0.05 $C enc -t 1 4 video 64 48 "$v" "$D/s1" && SEG_MB=0.05 $C enc -t 3 4 video 64 48 "$v" "$D/s3" || bad "C segmented enc"
