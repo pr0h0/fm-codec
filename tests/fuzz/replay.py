@@ -7,20 +7,27 @@ import os, struct, subprocess, sys, tempfile, zlib
 
 enc = sys.argv[1] == "--enc"
 c_bin, b_bin, corpus = sys.argv[1 + enc:4 + enc]
-BL = [0, (1 << 21) | 1 | 4, 1 | 2 | 4 | 32]
-BL += [BL[2] | 8 | 128 | 32768 | 65536 | 131072 | 262144]
-BL += [BL[3] | 16 | 256 | 2048, BL[3] | 16 | 256 | 2048]
-IL = [0, 1 << 21, 1 << 20, (1 << 20) | 32, (1 << 20) | 32 | 256 | 512, (1 << 20) | 32 | 256 | 512]
-AL = [0, 0, 32, 288, 2336, 2336]
-BL2, IL2, AL2 = [0, 0, 1, 5, 7, 15], [0, 0, 128, 192, 210, 242], [0, 0, 0, 2, 34, 34]
+def level_tables():
+    """(feat, feat2) per mode and level, read from files c/fm4 encodes (no copy of the tables to go stale)."""
+    t = {1: [(0, 0)], 2: [(0, 0)], 3: [(0, 0)]}
+    with tempfile.TemporaryDirectory() as d:
+        open(f"{d}/in", "wb").write(b"the quick brown fox jumps over the lazy dog. " * 40)   # 1800 bytes, compressible
+        for mode, args in ((1, ["bytes"]), (2, ["image", "10"]), (3, ["audio", "2"])):
+            for level in range(1, 6):
+                subprocess.run([c_bin, "enc", str(level), *args, f"{d}/in", f"{d}/out"], check=True, capture_output=True)
+                h = open(f"{d}/out", "rb").read(36)
+                assert h[4] == mode, f"level {level} {args} was stored; use more compressible data"
+                t[mode].append((struct.unpack("<I", h[8:12])[0], struct.unpack("<I", h[24:28])[0]))
+    return t
+
+LEVELS = level_tables()
 
 def repair(d):  # mirrors LLVMFuzzerTestOneInput in fuzz_decode.c
     f = bytearray(d)
     f[0:3] = b"FM4"; f[3] = 1 + (f[3] & 1); f[5] = 12 + f[5] % 3
     if f[9] & 1:
         mode, level = f[4] & 3, 1 + f[8] % 5
-        feat = (IL if mode == 2 else AL if mode == 3 else BL)[level]
-        feat2 = (IL2 if mode == 2 else AL2 if mode == 3 else BL2)[level]
+        feat, feat2 = LEVELS[mode if mode else 1][level]
         if mode == 1 and f[9] & 2: feat |= 64
         if mode == 2 and level >= 2 and f[9] & 2: feat2 |= 256; f[14] |= 1
         f[4] = mode; f[6] = 255; f[7] = 1 + f[7] % 15
@@ -72,7 +79,7 @@ with tempfile.TemporaryDirectory() as t:
             rc = subprocess.run([b, "dec", f"{t}/in", out], env=env, capture_output=True, timeout=120).returncode
             res.append((rc, open(out, "rb").read() if rc == 0 else None))
         n += 1
-        if any(rc > 1 for rc, _ in res): print(f"CRASH {name}: exit {[r[0] for r in res]}"); bad = 1
+        if any(rc not in (0, 1) for rc, _ in res): print(f"CRASH {name}: exit {[r[0] for r in res]}"); bad = 1
         elif (res[0][0] == 0) != (res[1][0] == 0) or res[0][1] != res[1][1]: print(f"DIFFER {name}: C exit {res[0][0]}, BPL exit {res[1][0]}"); bad = 1
 print(f"replayed {n} inputs: {'mismatch' if bad else 'C and BPL agree'}")
 sys.exit(bad)

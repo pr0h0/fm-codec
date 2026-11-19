@@ -5,7 +5,7 @@
 # (with node). UPDATE=1 rewrites tests/expected.txt. FM4=path overrides the C binary (e.g. a sanitizer build).
 set -u
 # sanitizer builds (FM4=...): report errors with status 99, which the corrupt-input checks don't accept
-export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0}:exitcode=99" UBSAN_OPTIONS="${UBSAN_OPTIONS:-print_stacktrace=1}:exitcode=99"
+export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0}:exitcode=99" UBSAN_OPTIONS="${UBSAN_OPTIONS:-print_stacktrace=1}:exitcode=99" MSAN_OPTIONS="${MSAN_OPTIONS:-}:exitcode=99"
 R=$(cd "$(dirname "$0")/.." && pwd)
 C=${FM4:-$R/c/fm4}
 B=$R/bpl/fm4

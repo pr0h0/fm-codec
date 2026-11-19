@@ -18,6 +18,7 @@ global HDR1: long = 28;
 global CRC_T: *uint = nullptr;
 global G_END: long = 0;   # decoding stops once G_POS passes it (format 2)
 global G_CRC: uint = 0;   # CRC-32 of the data being encoded
+global ANY_FEAT: bool = false;   # fm4AllowAnyParams(): accept files from FEAT/FEAT2/LR experiments (trusted input)
 
 # Allocation failure ends the process with status 1 (native) or traps (wasm, the host gets an exception):
 # it comes from corrupt or hostile sizes and must not turn into a null dereference.
@@ -2369,6 +2370,9 @@ frame fm4Decode(f: *u8, n: long) ret long {
 # those (params_ok in c/fm4.c): levels 1-5 of the mode, plus the x86 bit (bytes) and the video bit (image with a
 # frame height, levels 2-5), counter limit 255, mixer rate 1-15.
 frame paramsOk(mode: int, feat0: uint, feat20: uint, width: long, limit: int, lr: int) ret bool {
+    if (ANY_FEAT) {
+        return true;
+    }
     if (limit != 255 || lr < 1 || lr > 15) {
         return false;
     }
@@ -2390,6 +2394,13 @@ frame paramsOk(mode: int, feat0: uint, feat20: uint, width: long, limit: int, lr
         }
     }
     return false;
+}
+
+# Lifts the paramsOk restriction for files from FEAT/FEAT2/LR experiments (the native CLI: FM4_ANY_FEAT=1).
+# Only for trusted input: other parameter sets can index past the model's arrays.
+@[c_export]
+frame fm4AllowAnyParams() {
+    ANY_FEAT = true;
 }
 
 # Checks of one FM4 stream (m >= 28 bytes at s, decoded length L) that need no decoding: the fixed cap, and for
@@ -2468,4 +2479,5 @@ export fm4InputBuffer;
 export fm4Estimate;
 export xalloc;
 export fm4StreamOk;
+export fm4AllowAnyParams;
 export fm4SetArena;

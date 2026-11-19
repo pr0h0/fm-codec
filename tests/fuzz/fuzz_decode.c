@@ -1,7 +1,7 @@
 /* libFuzzer: c/fm4.c's decoder on hostile input. The harness repairs what would otherwise stop almost every
    mutation at the door (magic, a version, bb in 12-14 so tables stay small, L < 1 KB, mostly an accepted
    feature set, the format-2 header CRC), so the fuzzer exercises the model and coder on garbage payloads and headers a forger could write.
-   Build and run: make fuzz (tests/fuzz/README is in the Makefile comment). */
+   Build and run: make fuzz (tests/fuzz/run.sh). */
 #define main fm4_cli_main
 #include "../../c/fm4.c"
 #undef main

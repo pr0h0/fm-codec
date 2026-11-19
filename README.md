@@ -114,7 +114,8 @@ decode (without those checks). A new format version is introduced only when exis
 read the files; decoders keep reading every earlier version.
 Decoders accept only the parameter sets the encoder's levels write (feature bits, table size, counter
 limit, mixer rate) and whole pixels, frames or samples, since other combinations would index past the model's
-arrays; files from `FEAT`/`FEAT2`/`LR` experiments need `FM4_ANY_FEAT=1` to decode (trusted input only).
+arrays; files from `FEAT`/`FEAT2`/`LR` experiments need `FM4_ANY_FEAT=1` to decode with `c/fm4` or `bpl/fm4`
+(trusted input only; the wasm build always rejects them).
 `tests/fuzz/replay.py` replays fuzzing corpora through C and BPL and requires identical results;
 `tests/hostile/` keeps the inputs fuzzing found.
 

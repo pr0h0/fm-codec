@@ -3,7 +3,7 @@
  *   fm4 enc LEVEL(0-5) bytes IN OUT | enc LEVEL image WIDTH IN OUT | enc LEVEL audio CHANNELS IN OUT
  *   | enc LEVEL video WIDTH HEIGHT IN OUT | dec IN OUT | a [-m auto|bytes] [-t N] LEVEL OUT PATH... | x [-t N] IN [DIR]
  *   experiments: env FEAT, FEAT2 (feature bits, override the level), BB (log2 buckets/table), LR, HUGE=0;
- *   decoding files made with FEAT/FEAT2/LR needs FM4_ANY_FEAT=1 (trusted input only, see params_ok)
+ *   decoding files made with FEAT/FEAT2/LR needs FM4_ANY_FEAT=1 (C and the native BPL CLI; trusted input only)
  *
  * Container, format 2 (36-byte header, little endian):
  *   "FM4\x02" | mode u8 (0 store, 1 bytes, 2 image/video, 3 audio) | bb u8 | counter limit u8 | mixer lr u8
@@ -803,7 +803,6 @@ static uint8_t *fm4_encode(int level, int mode, int64_t width, uint8_t *data, in
     if (getenv("FEAT2")) feat2 = (uint32_t)atoi(getenv("FEAT2"));
     if (getenv("BB")) bb = atoi(getenv("BB"));
     if (bb < BB_MIN || bb > BB_MAX) { fprintf(stderr, "BB must be %d-%d\n", BB_MIN, BB_MAX); exit(1); }
-    if (LR < 1 || LR > 15) { fprintf(stderr, "LR must be 1-15\n"); exit(1); }
     uint8_t *best = NULL; int64_t bestLen = 0; uint32_t crc = crc32_of(data, L);
     if (level > 0) {
         feat &= ~64u;
@@ -1139,7 +1138,7 @@ int main(int argc, char **argv) {
         }
         if (argv[1][0] == 'x') { if (argc - k < 1 || argc - k > 2) goto usage; return extract(argv[k], argc - k == 2 ? argv[k + 1] : ".", threads); }
         if (argc < k + 3 || argv[k][0] < '0' || argv[k][0] > '5' || argv[k][1]) goto usage;
-        if (getenv("LR")) LR = atoi(getenv("LR"));
+        if (getenv("LR") && ((LR = atoi(getenv("LR"))) < 1 || LR > 15)) { fprintf(stderr, "LR must be 1-15\n"); return 2; }
         return archive(argv[k][0] - '0', media, threads, argv[k + 1], argv + k + 2, argc - k - 2);
     }
     int threads = sysconf(_SC_NPROCESSORS_ONLN);
@@ -1151,7 +1150,7 @@ int main(int argc, char **argv) {
         int level = atoi(argv[2]), video = !strcmp(argv[3], "video"), mode = !strcmp(argv[3], "image") || video ? 2 : !strcmp(argv[3], "audio") ? 3 : 1;
         int64_t width = mode >= 2 ? atoll(argv[4]) : 0, fheight = video ? atoll(argv[5]) : 0, L, n;
         if (level < 0 || level > 5 || (mode >= 2 && argc < 7 + video)) goto usage;
-        if (getenv("LR")) LR = atoi(getenv("LR"));
+        if (getenv("LR") && ((LR = atoi(getenv("LR"))) < 1 || LR > 15)) { fprintf(stderr, "LR must be 1-15\n"); return 2; }
         uint8_t *data = slurp(argv[(mode >= 2 ? 5 : 4) + video], &L);
         if (mode == 2 && (width <= 0 || width > 65535 || L % (3 * width))) { fprintf(stderr, "bad width\n"); return 1; }
         if (video && (width > 65535 || fheight <= 0 || fheight > 65535 || L % (3 * width * fheight))) { fprintf(stderr, "video: bad frame size\n"); return 1; }

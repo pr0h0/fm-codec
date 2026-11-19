@@ -29,9 +29,12 @@ done
 fail=0
 for h in decode roundtrip decode_msan; do
     echo "fuzz_$h: $SEC s"
-    (cd "$OUT" && ./fuzz_$h -max_total_time=$SEC -print_final_stats=1 -artifact_prefix="$OUT/crash_$h-" \
-        "$OUT/corpus_$h" "$OUT/seed_${h%_msan}" 2>&1 | grep -E "stat::number_of_executed_units|ERROR|runtime error|SUMMARY" ) || true
-    ls "$OUT"/crash_$h-* >/dev/null 2>&1 && { echo "fuzz_$h found a crash: $(ls "$OUT"/crash_$h-*)"; fail=1; }
+    # -timeout: a unit running longer than 10 s is a hang and is saved like a crash
+    st=0; (cd "$OUT" && ./fuzz_$h -max_total_time=$SEC -timeout=10 -print_final_stats=1 -artifact_prefix="$OUT/crash_$h-" \
+        "$OUT/corpus_$h" "$OUT/seed_${h%_msan}" > "$OUT/log_$h" 2>&1) || st=$?
+    grep -E "stat::number_of_executed_units|ERROR|runtime error|SUMMARY|timeout" "$OUT/log_$h" || true
+    if ls "$OUT"/crash_$h-* >/dev/null 2>&1; then echo "fuzz_$h found a crash or hang: $(ls "$OUT"/crash_$h-*)"; fail=1
+    elif [ $st != 0 ] || ! grep -q "stat::number_of_executed_units" "$OUT/log_$h"; then echo "fuzz_$h failed (exit $st), see $OUT/log_$h"; tail -20 "$OUT/log_$h"; fail=1; fi
 done
 [ $fail = 0 ] && echo "fuzzing: no crashes"
 exit $fail
