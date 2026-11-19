@@ -106,6 +106,13 @@ c/fm4 a -t 1 4 out.fma dir                    # one process (default: all cores)
 c/fm4 x out.fma destdir                       # extract (also parallel)
 ```
 
+**Data larger than RAM:** the native builds (`c/fm4`, `bpl/fm4`) don't keep the data in memory. Inputs are
+memory-mapped, decoded output is written straight into a mapping of `OUT.partial` (renamed when complete, removed
+on failure), and buffers of 64 MB and more (encoder output, archive data, segment results) live in unlinked
+temporary files next to the output. The kernel can page all of it out, so only the model's tables (up to about
+1.2 GB per process) need memory: under a 1 GB memory limit a 3 GB file encodes and decodes (the previous build
+was killed), and a 1.2 GB text file encodes at level 1 under 512 MB. Windows still reads files into memory.
+
 **Platforms:** `c/fm4.c` builds on Linux, macOS and Windows (MinGW-w64, e.g. MSYS2 UCRT64:
 `make c/fm4 CC=gcc`); CI runs the test suite on Linux x86-64, macOS arm64 and Windows, and the locked output
 hashes must match on all three (the model uses IEEE double arithmetic without FMA contraction, and of libm

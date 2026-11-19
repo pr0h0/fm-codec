@@ -148,6 +148,26 @@ EOF
 done
 echo "corrupt inputs: $n runs"
 
+# ---- the file-backed paths (inputs mapped, output written in place, temporary files for big buffers) run
+# only from 64 MB; FM4_BIG=1 runs them on the small inputs: same files, and no temporary files left behind ----
+mkdir -p "$D/big" && cp "$D/in/text.txt" "$D/in/video_64x48.rgb" "$D/in/audio_2.pcm" "$D/in/random.bin" "$D/big/"
+(cd "$D/big" && export FM4_BIG=1 SEG_MB=0.05 PART_MB=0.02 &&
+    $C enc 4 bytes text.txt t.fm4 && $C dec t.fm4 t.out && cmp -s t.out text.txt && cmp -s t.fm4 "$D/text.txt.4.fm4" &&
+    $C enc 0 bytes random.bin r.fm4 && $C dec r.fm4 r.out && cmp -s r.out random.bin &&
+    $C enc -t 2 4 video 64 48 video_64x48.rgb v.fmv && cmp -s v.fmv "$D/s1" && $C dec v.fmv v.out && cmp -s v.out video_64x48.rgb &&
+    mkdir tree && cp text.txt audio_2.pcm random.bin tree/ && $C a 4 a.fma tree >/dev/null 2>&1 && mkdir x && $C x a.fma x >/dev/null 2>&1 &&
+    diff -r tree x/tree >/dev/null && ! $C dec "$D/text.txt.4.fm4" /nonexistent/dir/o 2>/dev/null &&
+    ! $C dec a.fma bad.out 2>/dev/null && [ ! -e bad.out ] && [ ! -e bad.out.partial ] &&
+    [ -z "$(ls -A . | grep -v '^\(text.txt\|video_64x48.rgb\|audio_2.pcm\|random.bin\|t.fm4\|t.out\|r.fm4\|r.out\|v.fmv\|v.out\|tree\|a.fma\|x\)$')" ] &&
+    [ -z "$(ls -A x | grep -v '^tree$')" ]) || bad "file-backed paths (FM4_BIG=1)"
+if [ $nb = 1 ]; then
+    (cd "$D/big" && export FM4_BIG=1 SEG_MB=0.05 && rm -f t.out v.out &&
+        $B enc 4 bytes text.txt tb.fm4 && cmp -s tb.fm4 t.fm4 && $B dec tb.fm4 t.out && cmp -s t.out text.txt &&
+        $B enc -t 2 4 video 64 48 video_64x48.rgb vb.fmv && cmp -s vb.fmv v.fmv && $B dec vb.fmv v.out && cmp -s v.out video_64x48.rgb &&
+        ! $B dec a.fma badb.out >/dev/null 2>&1 && [ ! -e badb.out ] && [ ! -e badb.out.partial ] &&
+        [ -z "$(ls -A . | grep '^\.fm4-\|partial$')" ]) || bad "BPL file-backed paths (FM4_BIG=1)"
+fi
+
 # ---- locked hashes ----
 if [ "${UPDATE:-0}" = 1 ]; then cp "$D/hashes" "$R/tests/expected.txt"; echo "tests/expected.txt updated"
 elif ! diff "$R/tests/expected.txt" "$D/hashes"; then bad "output differs from tests/expected.txt (UPDATE=1 if intended)"; fi
