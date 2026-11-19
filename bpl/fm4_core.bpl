@@ -13,7 +13,11 @@ import sqrt, floor, prefetch from "std/intrinsics.bpl";
 extern exit(code: int);
 extern puts(s: string) ret int;
 
-global HDR: long = 28;
+global HDR: long = 36;    # header size, format 2 (format 1: 28)
+global HDR1: long = 28;
+global CRC_T: *uint = nullptr;
+global G_END: long = 0;
+global G_CRC: uint = 0;   # CRC-32 of the data being encoded    # decoding stops once G_POS passes it (format 2)
 
 # Allocation failure ends the process with status 1 (native) or traps (wasm, the host gets an exception):
 # it comes from corrupt or hostile sizes and must not turn into a null dereference.
@@ -122,6 +126,14 @@ frame initTables() {
     }
     loop (local j: int = pi; j < 4096; j = j + 1) {
         STRETCH[j] = 2047;
+    }
+    CRC_T = cast<*uint>(xalloc(256 * 4));
+    loop (local i: uint = 0; i < cast<uint>(256); i = i + cast<uint>(1)) {
+        local c: uint = i;
+        loop (local k: int = 0; k < 8; k = k + 1) {
+            c = ((c & cast<uint>(1)) != cast<uint>(0)) ? (cast<uint>(0xEDB88320) ^ (c >> cast<uint>(1))) : (c >> cast<uint>(1));
+        }
+        CRC_T[i] = c;
     }
     RECIP = cast<*int>(xalloc(256 * 4));
     loop (local n: int = 0; n < 256; n = n + 1) {
@@ -335,13 +347,12 @@ frame lenBucket(m: long) ret int {
     return 16 + cast<int>(q);
 }
 
-# bytes past the capacity are dropped; only a nonzero one makes the result too long to matter
-# (trailing zero bytes are trimmed by the container, exactly as in C)
+# a byte past the capacity means the result cannot beat store (as in C, which keeps every byte)
 @[unchecked]
 frame emitByte(b: u8) {
     if (G_LEN < G_CAP) {
         G_BUF[G_LEN] = b;
-    } else if (b != cast<u8>(0)) {
+    } else {
         G_OVF = true;
     }
     G_LEN = G_LEN + 1;
@@ -1802,7 +1813,7 @@ frame runChunk(mode: int, bb: int, limit: int, feat: uint, feat2: uint, widthF: 
                 } else {
                     if (glen < gcap) {
                         gbuf[glen] = cast<u8>(x2 >> 24);
-                    } else if ((x2 >> 24) != cast<uint>(0)) {
+                    } else {
                         ovf = true;
                     }
                     glen = glen + 1;
@@ -2073,6 +2084,9 @@ frame run(mode: int, bb: int, limit: int, feat: uint, feat2: uint, width: long, 
         }
         runChunk(mode, bb, limit, feat, feat2, width, data, L, i0, i1);
         i0 = i0 + CHUNK;
+        if (G_DEC && G_POS > G_END) {
+            return;   # read past the end of the payload: corrupt (checked by the caller)
+        }
     }
 }
 
@@ -2126,11 +2140,22 @@ frame get32(p: *u8) ret uint {
     return cast<uint>(p[0]) | (cast<uint>(p[1]) << 8) | (cast<uint>(p[2]) << 16) | (cast<uint>(p[3]) << 24);
 }
 
-frame writeHeader(h: *u8, mode: int, bb: int, limit: int, lr: int, feat: uint, feat2: uint, width: long, L: long) {
+# CRC-32 (IEEE, as in zlib/PNG)
+@[unchecked]
+frame crc32Of(p: *u8, n: long) ret uint {
+    local t: *uint = CRC_T;
+    local c: uint = cast<uint>(0xFFFFFFFF);
+    loop (local i: long = 0; i < n; i = i + 1) {
+        c = t[cast<long>((c ^ cast<uint>(p[i])) & cast<uint>(255))] ^ (c >> cast<uint>(8));
+    }
+    return c ^ cast<uint>(0xFFFFFFFF);
+}
+
+frame writeHeader(h: *u8, mode: int, bb: int, limit: int, lr: int, feat: uint, feat2: uint, width: long, L: long, crc: uint) {
     h[0] = cast<u8>(70);
     h[1] = cast<u8>(77);
     h[2] = cast<u8>(52);
-    h[3] = cast<u8>(1);
+    h[3] = cast<u8>(2);
     h[4] = cast<u8>(mode);
     h[5] = cast<u8>(bb);
     h[6] = cast<u8>(limit);
@@ -2140,6 +2165,8 @@ frame writeHeader(h: *u8, mode: int, bb: int, limit: int, lr: int, feat: uint, f
     put32(ptrAdd(h, 16), cast<uint>(L & 4294967295));
     put32(ptrAdd(h, 20), cast<uint>(L >> 32));
     put32(ptrAdd(h, 24), feat2);
+    put32(ptrAdd(h, 28), crc);
+    put32(ptrAdd(h, 32), crc32Of(h, 32));
 }
 
 frame ensureOut(L: long) {
@@ -2171,13 +2198,7 @@ frame encodeOne(buf: *u8, mode: int, bb: int, limit: int, feat: uint, feat2: uin
     if (G_OVF) {
         return -1;
     }
-    if (G_LEN > G_CAP) {
-        G_LEN = G_CAP;
-    }
-    loop (G_LEN > HDR && buf[G_LEN - 1] == cast<u8>(0)) {
-        G_LEN = G_LEN - 1;
-    }
-    writeHeader(buf, mode, bb, limit, LR, feat, feat2, width, L);
+    writeHeader(buf, mode, bb, limit, LR, feat, feat2, width, L, G_CRC);
     return G_LEN;
 }
 
@@ -2236,6 +2257,7 @@ frame fm4Encode(level: int, mode: int, width: long, data: *u8, L: long) ret long
     LR = 4;
     local best: *u8 = OB0;
     local bestLen: long = -1;
+    G_CRC = crc32Of(data, L);
     if (level >= 1 && level <= 5) {
         local feat: uint = levelFeat(level, mode);
         local feat2: uint = levelFeat2(level, mode);
@@ -2254,7 +2276,7 @@ frame fm4Encode(level: int, mode: int, width: long, data: *u8, L: long) ret long
         }
     }
     if (bestLen < 0 || bestLen >= L + HDR) {
-        writeHeader(best, 0, 0, 0, 0, cast<uint>(0), cast<uint>(0), width, L);
+        writeHeader(best, 0, 0, 0, 0, cast<uint>(0), cast<uint>(0), width, L, G_CRC);
         memcpy(cast<*void>(ptrAdd(best, HDR)), cast<*void>(data), L);
         bestLen = L + HDR;
     }
@@ -2262,11 +2284,21 @@ frame fm4Encode(level: int, mode: int, width: long, data: *u8, L: long) ret long
     return bestLen;
 }
 
-# Decode; result in fm4Result(). Returns original length, or -1 for a bad container.
+# Decode; result in fm4Result(). Returns original length, or -1 for a bad container. Format 2: header CRC,
+# L bounded by the payload (~2840 bytes per payload byte at most), no read past the payload, CRC of the result;
+# format 1 (no CRCs, trailing zero bytes stripped): only a fixed cap on L. Same rules as c/fm4.c.
 @[c_export]
 frame fm4Decode(f: *u8, n: long) ret long {
     initTables();
-    if (n < HDR || f[0] != cast<u8>(70) || f[1] != cast<u8>(77) || f[2] != cast<u8>(52) || f[3] != cast<u8>(1)) {
+    if (n < HDR1 || f[0] != cast<u8>(70) || f[1] != cast<u8>(77) || f[2] != cast<u8>(52) || f[3] < cast<u8>(1) || f[3] > cast<u8>(2)) {
+        return -1;
+    }
+    local v2: bool = f[3] == cast<u8>(2);
+    local hd: long = v2 ? HDR : HDR1;
+    if (n < hd) {
+        return -1;
+    }
+    if (v2 && get32(ptrAdd(f, 32)) != crc32Of(f, 32)) {
         return -1;
     }
     local mode: int = cast<int>(f[4]);
@@ -2276,12 +2308,13 @@ frame fm4Decode(f: *u8, n: long) ret long {
     local feat2: uint = get32(ptrAdd(f, 24));
     local width: long = cast<long>(get32(ptrAdd(f, 12)));
     local L: long = cast<long>(get32(ptrAdd(f, 16))) | (cast<long>(get32(ptrAdd(f, 20))) << 32);
-    # corrupt header checks, as in c/fm4.c: images have a width, audio 1-8 channels, L a fixed cap (no bound from
-    # the payload size: trailing zero bytes are stripped, so 100 KB of 0xFF is a header-only file)
     if (mode > 3 || (mode == 2 && (width & 65535) == 0) || (mode == 3 && (width < 1 || width > 8))) {
         return -1;
     }
-    if (L < 0 || L > 1099511627776 || (mode == 0 && L > n - HDR)) {
+    if (mode != 0 && (bb < 12 || bb > 22)) {
+        return -1;
+    }
+    if (L < 0 || L > 1099511627776 || (mode == 0 && L > n - hd) || (v2 && mode != 0 && L / 4096 > n - hd)) {
         return -1;
     }
     if (L + 1 > DB_CAP) {
@@ -2296,12 +2329,13 @@ frame fm4Decode(f: *u8, n: long) ret long {
         }
     }
     if (mode == 0) {
-        memcpy(cast<*void>(DB), cast<*void>(ptrAdd(f, HDR)), L);
+        memcpy(cast<*void>(DB), cast<*void>(ptrAdd(f, hd)), L);
     } else {
         LR = cast<int>(f[7]);
         G_DEC = true;
-        G_BUF = ptrAdd(f, HDR);
-        G_LEN = n - HDR;
+        G_BUF = ptrAdd(f, hd);
+        G_LEN = n - hd;
+        G_END = v2 ? n - hd : 9223372036854775807;
         G_POS = 0;
         G_X1 = 0;
         G_X2 = cast<uint>(0xFFFFFFFF);
@@ -2312,9 +2346,15 @@ frame fm4Decode(f: *u8, n: long) ret long {
         }
         run(mode, bb, limit, feat, feat2, width, DB, L);
         G_DEC = false;
+        if (G_POS > G_END) {
+            return -1;
+        }
         if ((feat & cast<uint>(64)) != cast<uint>(0)) {
             e8e9(DB, L, false);
         }
+    }
+    if (v2 && crc32Of(DB, L) != get32(ptrAdd(f, 28))) {
+        return -1;
     }
     RESULT = DB;
     return L;

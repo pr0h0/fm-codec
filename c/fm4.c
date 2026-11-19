@@ -4,10 +4,14 @@
  *   | enc LEVEL video WIDTH HEIGHT IN OUT | dec IN OUT | a [-m auto|bytes] [-t N] LEVEL OUT PATH... | x [-t N] IN [DIR]
  *   experiments: env FEAT, FEAT2 (feature bits, override the level), BB (log2 buckets/table), LR, HUGE=0
  *
- * Container (28-byte header, little endian):
- *   "FM4\x01" | mode u8 (0 store, 1 bytes, 2 image/video, 3 audio) | bb u8 | counter limit u8 | mixer lr u8
- *   | feat u32 | width u32 | L u64 | feat2 u32 | payload (store: raw bytes; else digits of N: data = model-decode(N/256^k))
+ * Container, format 2 (36-byte header, little endian):
+ *   "FM4\x02" | mode u8 (0 store, 1 bytes, 2 image/video, 3 audio) | bb u8 | counter limit u8 | mixer lr u8
+ *   | feat u32 | width u32 | L u64 | feat2 u32 | CRC-32 of the data u32 | CRC-32 of header bytes 0-31 u32
+ *   | payload (store: raw bytes; else the arithmetic coder's bytes, all of them)
  *   width: image width; audio: channels (1-8); video: width | frame height << 16.
+ *   Format 1 ("FM4\x01", 28 bytes: no CRCs, trailing zero bytes of the payload stripped) is still decoded.
+ *   The version byte changes whenever an existing decoder could not read the new files; decoders keep reading
+ *   every earlier version.
  *
  * Feature bits 2 (feat2):
  *   1 mixer selection by hit count   2 4th mixer   4 text contexts   8 run inputs   16 OLS predictor
@@ -49,7 +53,8 @@
 
 #define MAXIN 96
 #define NPRED 12
-#define HDR 28
+#define HDR 36    /* header size, format 2 (format 1: 28) */
+#define HDR1 28
 #define MBITS 22
 
 static int SQ_T[33] = {1, 2, 3, 6, 10, 16, 27, 45, 73, 120, 194, 310, 488, 747, 1101, 1546, 2047,
@@ -119,9 +124,10 @@ static inline uint32_t *find_bucket(uint32_t *T, int bb, uint32_t h) {
     return v;
 }
 
-typedef struct { uint32_t x1, x2, x; uint8_t *buf; int64_t len, pos, cap; int dec; } Coder;
+/* end: decoding stops once pos passes it (format 2: a valid stream is never read past its last byte) */
+typedef struct { uint32_t x1, x2, x; uint8_t *buf; int64_t len, pos, cap; int dec; int64_t end; } Coder;
 static void emit(Coder *c, uint8_t b) {
-    if (c->len == c->cap) { c->cap = c->cap ? c->cap * 2 : 1 << 16; c->buf = realloc(c->buf, c->cap); }
+    if (c->len == c->cap) { c->cap = c->cap ? c->cap * 2 : 1 << 16; c->buf = alloc_ok(realloc(c->buf, c->cap)); }
     c->buf[c->len++] = b;
 }
 static inline int code_bit(Coder *c, int p12, int bit) {
@@ -274,7 +280,7 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, uint32_t f
     int hord = 0, isym = -1, iq = 0, imiss = 0; uint16_t IMP[64]; uint8_t IMN[64] = {0}; for (int j = 0; j < 64; j++) IMP[j] = 49152;
     static const int ORD[8] = {0, 1, 2, 3, 4, 6, 5, 7};
 
-    for (int64_t i = 0; i < L; i++) {
+    for (int64_t i = 0; i < L && c->pos <= c->end; i++) {
         int ch = 0, act = 0, eP = 0, pred = 0, sym = 0, pr[NPRED];
         int mb = -1, lenq = 0, msel = 0, mb2 = -1, lenq2 = 0;
         if (aud) {
@@ -733,10 +739,18 @@ static void e8e9(uint8_t *d, int64_t n, int fwd) {
 }
 static void put32(uint8_t *p, uint32_t v) { for (int i = 0; i < 4; i++) p[i] = v >> (8 * i); }
 static uint32_t get32(const uint8_t *p) { return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24; }
-static void header(uint8_t *h, int mode, int bb, int limit, int lr, uint32_t feat, uint32_t feat2, int64_t width, int64_t L) {
-    memcpy(h, "FM4\x01", 4); h[4] = mode; h[5] = bb; h[6] = limit; h[7] = lr;
+/* CRC-32 (IEEE, as in zlib/PNG) */
+static uint32_t crc32_of(const uint8_t *p, int64_t n) {
+    static uint32_t T[256];
+    if (!T[1]) for (uint32_t i = 0; i < 256; i++) { uint32_t c = i; for (int k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320u ^ (c >> 1) : c >> 1; T[i] = c; }
+    uint32_t c = 0xFFFFFFFFu;
+    for (int64_t i = 0; i < n; i++) c = T[(c ^ p[i]) & 255] ^ (c >> 8);
+    return c ^ 0xFFFFFFFFu;
+}
+static void header(uint8_t *h, int mode, int bb, int limit, int lr, uint32_t feat, uint32_t feat2, int64_t width, int64_t L, uint32_t crc) {
+    memcpy(h, "FM4\x02", 4); h[4] = mode; h[5] = bb; h[6] = limit; h[7] = lr;
     put32(h + 8, feat); put32(h + 12, (uint32_t)width); put32(h + 16, (uint32_t)L); put32(h + 20, (uint32_t)((uint64_t)L >> 32));
-    put32(h + 24, feat2);
+    put32(h + 24, feat2); put32(h + 28, crc); put32(h + 32, crc32_of(h, 32));
 }
 /* Levels (feat, feat2):
  *   bytes 1: orders 1-3 + match                    2: orders 0-4,6, match, words, mixer2/APM, hit-count mixer select
@@ -763,45 +777,51 @@ static uint8_t *fm4_encode(int level, int mode, int64_t width, uint8_t *data, in
     if (getenv("FEAT")) feat = (uint32_t)atoi(getenv("FEAT"));
     if (getenv("FEAT2")) feat2 = (uint32_t)atoi(getenv("FEAT2"));
     if (getenv("BB")) bb = atoi(getenv("BB"));
-    uint8_t *best = NULL; int64_t bestLen = 0;
+    uint8_t *best = NULL; int64_t bestLen = 0; uint32_t crc = crc32_of(data, L);
     if (level > 0) {
         feat &= ~64u;
         if (mode == 1 && e8e9_detect(data, L)) { e8e9(data, L, 1); feat |= 64; }
-        Coder c = {0, 0xFFFFFFFFu, 0, NULL, 0, 0, 0, 0};
+        Coder c = {0, 0xFFFFFFFFu, 0, NULL, 0, 0, 0, 0, INT64_MAX};
         for (int i = 0; i < HDR; i++) emit(&c, 0);
         run(&c, mode, bb, limit, feat, feat2, width, data, L);
         for (int i = 3; i >= 0; i--) emit(&c, c.x1 >> (8 * i));
-        while (c.len > HDR && c.buf[c.len - 1] == 0) c.len--;
-        header(c.buf, mode, bb, limit, LR, feat, feat2, width, L);
+        header(c.buf, mode, bb, limit, LR, feat, feat2, width, L, crc);
         best = c.buf; bestLen = c.len;
         if (feat & 64) e8e9(data, L, 0);
     }
     if (!best || bestLen >= L + HDR) {   /* store */
         free(best);
         best = xmalloc(L + HDR);
-        header(best, 0, 0, 0, 0, 0, 0, width, L);
+        header(best, 0, 0, 0, 0, 0, 0, width, L, crc);
         memcpy(best + HDR, data, L); bestLen = L + HDR;
     }
     *outLen = bestLen;
     return best;
 }
+/* Format 2 (written): header CRC checked first, L bounded by the payload (no zero bytes are stripped, and every
+   coded bit has p in [1, 4095]/4096 so costs at least log2(4096/4095) bits: at most ~2840 bytes per payload byte;
+   50 MB of zeros: 2838), decoding stops at the end of the payload, and the CRC of the result must match.
+   Format 1 (read only): trailing zero bytes were stripped, so L can only have a fixed cap and nothing is checked. */
 static uint8_t *fm4_decode(uint8_t *f, int64_t n, int64_t *outLen) {
-    if (n < HDR || memcmp(f, "FM4\x01", 4)) return NULL;
+    if (n < HDR1 || memcmp(f, "FM4", 3) || f[3] < 1 || f[3] > 2) return NULL;
+    int v2 = f[3] == 2, hd = v2 ? HDR : HDR1;
+    if (n < hd || (v2 && get32(f + 32) != crc32_of(f, 32))) return NULL;
     int mode = f[4], bb = f[5], limit = f[6]; uint32_t feat = get32(f + 8), feat2 = get32(f + 24);
     int64_t width = get32(f + 12), L = (int64_t)get32(f + 16) | (int64_t)get32(f + 20) << 32;
     if (mode > 3 || (mode == 2 && !(width & 0xFFFF)) || (mode == 3 && (width < 1 || width > 8))) return NULL;   /* corrupt header */
-    /* No bound from the payload size: trailing zero bytes are stripped and a run of predicted 1-bits codes as
-       zeros, so 100 KB of 0xFF is a header-only file. A fixed cap; a corrupt L that cannot be allocated fails there. */
-    if (L < 0 || L > (int64_t)1 << 40 || (mode == 0 && L > n - HDR)) return NULL;
+    if (mode && (bb < 12 || bb > 22)) return NULL;   /* table bits: the encoder writes 18 or 19 */
+    if (L < 0 || L > (int64_t)1 << 40 || (mode == 0 && L > n - hd) || (v2 && mode && L / 4096 > n - hd)) return NULL;
     uint8_t *data = xmalloc(L ? L : 1);
-    if (mode == 0) memcpy(data, f + HDR, L);
+    if (mode == 0) memcpy(data, f + hd, L);
     else {
         LR = f[7];
-        Coder c = {0, 0xFFFFFFFFu, 0, f + HDR, n - HDR, 0, 0, 1};
+        Coder c = {0, 0xFFFFFFFFu, 0, f + hd, n - hd, 0, 0, 1, v2 ? n - hd : INT64_MAX};
         for (int i = 0; i < 4; i++) c.x = (c.x << 8) | (c.pos < c.len ? c.buf[c.pos] : 0), c.pos++;
         run(&c, mode, bb, limit, feat, feat2, width, data, L);
+        if (c.pos > c.end) { free(data); return NULL; }   /* read past the end: corrupt */
         if (feat & 64) e8e9(data, L, 0);
     }
+    if (v2 && crc32_of(data, L) != get32(f + 28)) { free(data); return NULL; }
     *outLen = L;
     return data;
 }
@@ -985,9 +1005,9 @@ static int extract(const char *in, const char *dir, int threads) {
     if (n < 8 || memcmp(f, "FMA\x02", 4)) { fprintf(stderr, "not an FMA archive\n"); return 1; }
     int64_t nsolid = get32(f + 4), nj = 0, cap = 0; Job *jobs = NULL;
     for (int64_t pos = 8; pos < n; ) {   /* list the streams, then decode them all in parallel into one shared buffer */
-        if (n - pos < 8 + HDR) goto bad;
+        if (n - pos < 8 + HDR1) goto bad;
         int64_t m = get64(f + pos), L = get64(f + pos + 8 + 16);
-        if (m < HDR || m > n - pos - 8 || L < 0 || L > (int64_t)1 << 40 || all + L < all) goto bad;
+        if (m < HDR1 || m > n - pos - 8 || L < 0 || L > (int64_t)1 << 40 || all + L < all) goto bad;
         if (nj == cap) jobs = realloc(jobs, (cap = 2 * cap + 16) * sizeof(Job));
         jobs[nj] = (Job){0, 0, 0, L, m, f + pos + 8, NULL, 0};
         if (nj++ < nsolid) sn += L;
@@ -1055,12 +1075,12 @@ static int enc_video_segments(int level, int64_t width, uint8_t *data, int64_t L
 }
 static uint8_t *dec_video_segments(uint8_t *f, int64_t n, int threads, int64_t *outLen) {
     int64_t ns = get32(f + 4), all = 0, pos = 8;
-    if (ns > (n - 8) / (8 + HDR)) return NULL;   /* each segment takes at least 8 + HDR bytes */
+    if (ns > (n - 8) / (8 + HDR1)) return NULL;   /* each segment takes at least 8 + HDR1 bytes */
     Job *jobs = xcalloc(ns ? ns : 1, sizeof(Job));
     for (int64_t k = 0; k < ns; k++) {
-        if (n - pos < 8 + HDR) return NULL;
+        if (n - pos < 8 + HDR1) return NULL;
         int64_t m = get64(f + pos), L = get64(f + pos + 8 + 16);
-        if (m < HDR || m > n - pos - 8 || L < 0 || L > (int64_t)1 << 40 || all + L < all) return NULL;
+        if (m < HDR1 || m > n - pos - 8 || L < 0 || L > (int64_t)1 << 40 || all + L < all) return NULL;
         jobs[k] = (Job){0, 0, 0, L, m, f + pos + 8, NULL, 0};
         all += L; pos += 8 + m;
     }

@@ -46,6 +46,13 @@ video_64x48.rgb video 64 48
 EOF
 if [ $nw = 1 ]; then node "$R/tests/wasm_check.mjs" "$R/bpl" "$D/wasm.list" || bad "wasm"; fi
 
+# ---- format 1 files (written by the previous encoder) still decode ----
+for t in "text.fm4 text.txt" "img_96.fm4 img_96.rgb" "ff.fm4 ff.bin"; do
+    set -- $t
+    $C dec "$R/tests/v1/$1" "$D/d" && cmp -s "$D/d" "$D/in/$2" || bad "C format 1 decode $1"
+    if [ $nb = 1 ]; then $B dec "$R/tests/v1/$1" "$D/d" && cmp -s "$D/d" "$D/in/$2" || bad "BPL format 1 decode $1"; fi
+done
+
 # ---- segmented video: same file for any thread count and build ----
 v=$D/in/video_64x48.rgb
 SEG_MB=0.05 $C enc -t 1 4 video 64 48 "$v" "$D/s1" && SEG_MB=0.05 $C enc -t 3 4 video 64 48 "$v" "$D/s3" || bad "C segmented enc"
@@ -69,14 +76,17 @@ mkdir "$D/x" && $C x "$D/a1.fma" "$D/x" >/dev/null 2>&1 && diff -r "$D/tree" "$D
 [ "$(ls -l "$D/x/tree/sub/bin.dat" | cut -c1-10)" = "-rwxr-x---" ] || bad "archive permissions"
 mkdir "$D/x2" && (cd "$D/x2" && $C x "$D/a1.fma" >/dev/null 2>&1) && diff -r "$D/tree" "$D/x2/tree" >/dev/null || bad "extract to ."
 
-# ---- corrupt input: may fail, must not crash or hang (exit status 0 or 1) ----
+# ---- corrupt input ----
 n=0
-for o in "$D/text.txt.4.fm4" "$D/img_96.rgb.4.fm4" "$D/audio_2.pcm.4.fm4" "$D/video_64x48.rgb.4.fm4" "$D/s1" "$D/a1.fma"; do
+# corrupt input: may fail, must not crash or hang (exit status 0 or 1); format 2 has CRCs, so a decode that
+# succeeds must give the original data
+for t in "text.txt.4.fm4 text.txt" "img_96.rgb.4.fm4 img_96.rgb" "audio_2.pcm.4.fm4 audio_2.pcm" "video_64x48.rgb.4.fm4 video_64x48.rgb" "s1 video_64x48.rgb" "a1.fma -"; do
+    set -- $t; o=$D/$1 orig=$D/in/$2
     python3 - "$o" "$D/zc" <<'EOF'
 import sys
 d = open(sys.argv[1], "rb").read()
 cases = [d[:k] for k in (0, 3, 4, 8, 20, 27, 28, 29, 40, len(d) // 2, len(d) - 1)] + [d + b"\0"]
-for p in (4, 5, 6, 7, 8, 9, 12, 16, 17, 20, 23, 24, 30, 36, 45, len(d) // 3, len(d) - 2):
+for p in (3, 4, 5, 6, 7, 8, 9, 12, 16, 17, 18, 19, 20, 23, 24, 28, 31, 32, 35, 36, 45, len(d) // 3, len(d) - 2):
     if p < len(d):
         e = bytearray(d); e[p] ^= 0x41; cases.append(bytes(e))
 for i, c in enumerate(cases):
@@ -89,6 +99,7 @@ EOF
             rm -rf "$D/zx"; mkdir "$D/zx"
             $T $bin $cmd >/dev/null 2>&1; rc=$?
             [ $rc -le 1 ] || bad "${bin#$R/} $cmd ($(basename "$o") case ${z##*zc}): exit status $rc"
+            [ $rc = 0 ] && [ "$2" != - ] && ! cmp -s "$D/zd" "$orig" && bad "${bin#$R/} $cmd ($(basename "$o") case ${z##*zc}): wrong output accepted"
             n=$((n + 1))
         done
         rm -f "$z"
