@@ -338,11 +338,14 @@ frame runJobs(nj: long, threads: long, decode: bool, mode: int, level: int, widt
             if (pid == 0) {
                 if (decode) {
                     hugeArenaN(fm4EstimateDecode(Ls[j], cast<int>(ins[j][4]), cast<int>(ins[j][5])));
+                    fm4UseBuffer(outs[j], Ls[j]);   # decode straight into this segment's part of the output (as C)
                     local m: long = fm4Decode(ins[j], ns[j]);
                     if (m != Ls[j]) {
                         _exit(1);
                     }
-                    memcpy(cast<*void>(outs[j]), cast<*void>(fm4Result()), m);
+                    if (fm4Result() != outs[j]) {
+                        memcpy(cast<*void>(outs[j]), cast<*void>(fm4Result()), m);
+                    }
                 } else {
                     hugeArena(Ls[j], mode);
                     local m2: long = fm4Encode(level, mode, width, ins[j], Ls[j]);
