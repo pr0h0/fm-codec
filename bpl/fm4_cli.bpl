@@ -2,7 +2,7 @@
 # fm4 enc LEVEL audio CHANNELS IN OUT | fm4 enc LEVEL video WIDTH HEIGHT IN OUT | fm4 dec IN OUT
 # fm4 enc|dec -t N ...: processes for segmented video (same FMV format and cut as c/fm4.c).
 import printf, malloc, strcmp, atoi from "std/c.bpl";
-import fm4Encode, fm4Decode, fm4Result, fm4Estimate, fm4SetArena, xalloc, fm4StreamOk, fm4AllowAnyParams from "./fm4_core.bpl";
+import fm4Encode, fm4Decode, fm4Result, fm4Estimate, fm4EstimateDecode, fm4SetArena, xalloc, fm4StreamOk, fm4AllowAnyParams from "./fm4_core.bpl";
 
 extern fopen(path: string, mode: string) ret *void;
 extern fread(buffer: *void, size: long, count: long, stream: *void) ret long;
@@ -30,7 +30,10 @@ global USAGE: string = "usage: fm4 enc LEVEL(0-5) bytes IN OUT | fm4 enc LEVEL i
 # Working memory for L input bytes on 2 MB huge pages where the system gives them (fewer TLB misses
 # in the big hash tables; no effect on the output). On failure the codec allocates for itself.
 frame hugeArena(L: long, mode: int) {
-    local n: long = fm4Estimate(L, mode);
+    hugeArenaN(fm4Estimate(L, mode));
+}
+
+frame hugeArenaN(n: long) {
     local p: *void = nullptr;
     if (posix_memalign(&p, 2097152, n) == 0) {
         madvise(p, n, 14);
@@ -127,7 +130,7 @@ frame runJobs(nj: long, threads: long, decode: bool, mode: int, level: int, widt
             }
             if (pid == 0) {
                 if (decode) {
-                    hugeArena(Ls[j], 2);
+                    hugeArenaN(fm4EstimateDecode(Ls[j], cast<int>(ins[j][4]), cast<int>(ins[j][5])));
                     local m: long = fm4Decode(ins[j], ns[j]);
                     if (m != Ls[j]) {
                         _exit(1);
@@ -324,9 +327,9 @@ frame main(argc: int, argv: *string) ret int {
             return spit(argv[3], d, dl);
         }
         if (n >= 28) {
-            # original length (low 32 bits) and mode from the header
+            # original length (low 32 bits), mode and table bits from the header
             local hl: long = cast<long>(f[16]) | (cast<long>(f[17]) << 8) | (cast<long>(f[18]) << 16) | (cast<long>(f[19]) << 24);
-            hugeArena(hl, cast<int>(f[4]));
+            hugeArenaN(fm4EstimateDecode(hl, cast<int>(f[4]), cast<int>(f[5])));
         }
         local L: long = fm4Decode(f, n);
         if (L < 0) {

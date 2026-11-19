@@ -58,7 +58,8 @@
 #define HDR1 28
 #define MBITS 22
 #define BB_MIN 12   /* table bits (log2 buckets per context) a file may use */
-#define BB_MAX 22
+#define BB_MAX 20   /* the encoder writes at most 2^20 buckets (~1.2 GB of tables): every new file decodes in wasm32 */
+#define BB_DEC_MAX 22   /* decoders also read 21-22 (earlier BB= experiments; ~4.4 GB, native builds only) */
 
 static int SQ_T[33] = {1, 2, 3, 6, 10, 16, 27, 45, 73, 120, 194, 310, 488, 747, 1101, 1546, 2047,
                        2549, 2994, 3348, 3607, 3785, 3901, 3975, 4022, 4050, 4068, 4079, 4085, 4089, 4092, 4093, 4094};
@@ -798,6 +799,10 @@ static int params_ok(int mode, uint32_t feat, uint32_t feat2, int64_t width, int
 static uint8_t *fm4_encode(int level, int mode, int64_t width, uint8_t *data, int64_t L, int64_t *outLen) {
     uint32_t feat = LEVEL_FEAT(mode, level), feat2 = LEVEL_FEAT2(mode, level);
     int bb = level == 5 && mode == 1 ? 19 : 18, limit = 255;
+    /* short inputs get small tables: 2^(bb-2) >= L (16 buckets each; larger tables would stay mostly empty).
+       Costs at most ~0.05% in size and cuts memory for a 2 KB input from 320 to 50 MB. */
+    int small = BB_MIN; while (small < bb && ((int64_t)1 << (small - 2)) < L) small++;
+    bb = small;
     if (mode == 2 && (width >> 16) && (width & 0xFFFF) && level >= 2) feat2 |= 256;   /* video (a plain image 65536*k wide is not: run() would divide by width 0) */
     if (getenv("FEAT")) feat = (uint32_t)atoi(getenv("FEAT"));
     if (getenv("FEAT2")) feat2 = (uint32_t)atoi(getenv("FEAT2"));
@@ -843,7 +848,7 @@ static uint8_t *fm4_decode(uint8_t *f, int64_t n, int64_t *outLen) {
     int64_t width = get32(f + 12), L = get64(f + 16);
     if (!stream_ok(f, n, L)) return NULL;   /* format 2: header CRC and L bound */
     if (mode > 3 || (mode == 2 && !(width & 0xFFFF)) || (mode == 3 && (width < 1 || width > 8))) return NULL;   /* corrupt header */
-    if (mode && (bb < BB_MIN || bb > BB_MAX || !params_ok(mode, feat, feat2, width, limit, f[7]))) return NULL;   /* the encoder never writes others */
+    if (mode && (bb < BB_MIN || bb > BB_DEC_MAX || !params_ok(mode, feat, feat2, width, limit, f[7]))) return NULL;   /* the encoder never writes others */
     if (mode == 0 && L > n - hd) return NULL;
     /* whole pixels / frames / samples, as the encoder requires (else the last bytes would never be written) */
     if ((mode == 2 && (L % (3 * (width & 0xFFFF)) || ((width >> 16) && L % (3 * (width & 0xFFFF) * (width >> 16))))) || (mode == 3 && L % (2 * width))) return NULL;

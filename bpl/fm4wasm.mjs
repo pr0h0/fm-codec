@@ -15,11 +15,17 @@ export async function loadFm4Wasm(source) {
   if (x.__wasm_call_ctors) x.__wasm_call_ctors();
 
   // bump allocator never grows memory: grow it here before any call that may allocate
-  const ensure = (L, mode) => {
+  // (decoding: bb is the stream's table bits, which set its table sizes)
+  const ensure = (L, mode, bb = -1) => {
     const top = x.malloc(0n) >>> 0;                       // current heap cursor
-    const need = top + Number(x.fm4Estimate(BigInt(L), mode));
+    const need = top + Number(bb < 0 ? x.fm4Estimate(BigInt(L), mode) : x.fm4EstimateDecode(BigInt(L), mode, bb));
     const have = mem.buffer.byteLength;
-    if (need > have) mem.grow(Math.ceil((need - have) / 65536));
+    // the module's allocator takes sizes below 2 GB (a bb 21-22 stream needs more: native builds only)
+    if (need >= 2 ** 31) throw new Error(`fm4: not enough memory: needs ${Math.ceil(need / 2 ** 20)} MB, the wasm build handles up to 2048 MB`);
+    if (need > have) {
+      try { mem.grow(Math.ceil((need - have) / 65536)); }
+      catch { throw new Error(`fm4: not enough memory: could not grow wasm memory to ${Math.ceil(need / 2 ** 20)} MB (the engine's limit; 4096 MB at most in wasm32)`); }
+    }
   };
   const copyIn = (data, mode) => {
     ensure(data.length, mode);
@@ -47,9 +53,13 @@ export async function loadFm4Wasm(source) {
       return copyOut(n);
     },
     decode(buf) {
-      const L = buf.length >= 28 ? new DataView(buf.buffer, buf.byteOffset).getUint32(16, true) : 0;
+      // header checks first (magic, version, format-2 CRC, table bits) so a corrupt byte can't size memory
+      const L = buf.length >= 28 ? Number(new DataView(buf.buffer, buf.byteOffset).getBigUint64(16, true)) : 0;
+      const ok = buf.length >= 28 && buf[0] === 70 && buf[1] === 77 && buf[2] === 52 && (buf[3] === 1 || buf[3] === 2)
+        && streamOk(buf, L) && (buf[4] === 0 || (buf[5] >= 12 && buf[5] <= 22));
+      if (!ok) throw new Error("not an FM4 file");
       const m = buf[4];
-      ensure(Math.max(L, buf.length), m);
+      ensure(Math.max(L, buf.length), m, buf[5]);   // a 64-bit L past the 2 GB the module handles is refused there
       const p = x.fm4InputBuffer(BigInt(buf.length)) >>> 0;
       new Uint8Array(mem.buffer, p, buf.length).set(buf);
       const n = Number(x.fm4Decode(p, BigInt(buf.length)));

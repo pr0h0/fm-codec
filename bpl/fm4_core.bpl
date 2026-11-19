@@ -15,6 +15,8 @@ extern puts(s: string) ret int;
 
 global HDR: long = 36;    # header size, format 2 (format 1: 28)
 global HDR1: long = 28;
+global BB_MIN: int = 12;       # table bits a stream may use (c/fm4.c BB_MIN, BB_DEC_MAX); the encoder writes <= 20
+global BB_DEC_MAX: int = 22;
 global CRC_T: *uint = nullptr;
 global G_END: long = 0;   # decoding stops once G_POS passes it (format 2)
 global G_CRC: uint = 0;   # CRC-32 of the data being encoded
@@ -2262,7 +2264,7 @@ frame fm4Encode(level: int, mode: int, width: long, data: *u8, L: long) ret long
     if (level >= 1 && level <= 5) {
         local feat: uint = levelFeat(level, mode);
         local feat2: uint = levelFeat2(level, mode);
-        local bb: int = (level == 5 && mode == 1) ? 19 : 18;
+        local bb: int = bbFor(L, (level == 5 && mode == 1) ? 19 : 18);
         # video; a plain image 65536*k wide is not (its low 16 bits are no width)
         if (mode == 2 && (width >> 16) != 0 && (width & 65535) != 0 && level >= 2) {
             feat2 = feat2 | cast<uint>(256);
@@ -2309,7 +2311,7 @@ frame fm4Decode(f: *u8, n: long) ret long {
     if (mode > 3 || (mode == 2 && (width & 65535) == 0) || (mode == 3 && (width < 1 || width > 8))) {
         return -1;
     }
-    if (mode != 0 && (bb < 12 || bb > 22 || !paramsOk(mode, feat, feat2, width, limit, cast<int>(f[7])))) {
+    if (mode != 0 && (bb < BB_MIN || bb > BB_DEC_MAX || !paramsOk(mode, feat, feat2, width, limit, cast<int>(f[7])))) {
         return -1;
     }
     if (mode == 0 && L > n - hd) {
@@ -2449,10 +2451,28 @@ frame fm4InputBuffer(n: long) ret *u8 {
     return IB;
 }
 
-# Upper bound of bytes the next encode/decode of L bytes (any level) may newly allocate.
+# Table bits for L bytes: the level's default, or less for short inputs (2^(bb-2) >= L), as in c/fm4.c.
+frame bbFor(L: long, dflt: int) ret int {
+    local bb: int = BB_MIN;
+    loop (bb < dflt && (cast<long>(1) << cast<long>(bb - 2)) < L) {
+        bb = bb + 1;
+    }
+    return bb;
+}
+
+# Upper bound of bytes the next encode of L bytes (any level) may newly allocate.
 @[c_export]
 frame fm4Estimate(L: long, mode: int) ret long {
-    local bb: int = (mode == 2) ? 18 : 19;
+    return estimateWith(L, mode, bbFor(L, (mode == 2) ? 18 : 19));
+}
+
+# The same for decoding a stream whose header says bb (any value a decoder accepts).
+@[c_export]
+frame fm4EstimateDecode(L: long, mode: int, bb: int) ret long {
+    return estimateWith(L, mode, (bb < BB_MIN) ? BB_MIN : ((bb > BB_DEC_MAX) ? BB_DEC_MAX : bb));
+}
+
+frame estimateWith(L: long, mode: int, bb: int) ret long {
     local total: long = 1048576 + 4096 * 4 + 256 * 4 + 33 * 4;
     # worst case: video bit set, 8 audio channels
     local ar: long = arenaSize(mode, bb, levelFeat(5, mode), levelFeat2(5, mode) | cast<uint>((mode == 2) ? 256 : 0), L, 8);
@@ -2477,6 +2497,7 @@ export fm4Decode;
 export fm4Result;
 export fm4InputBuffer;
 export fm4Estimate;
+export fm4EstimateDecode;
 export xalloc;
 export fm4StreamOk;
 export fm4AllowAnyParams;
