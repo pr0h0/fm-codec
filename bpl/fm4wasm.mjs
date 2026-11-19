@@ -20,7 +20,10 @@ export async function loadFm4Wasm(source) {
     const top = x.malloc(0n) >>> 0;                       // current heap cursor
     const need = top + Number(bb < 0 ? x.fm4Estimate(BigInt(L), mode) : x.fm4EstimateDecode(BigInt(L), mode, bb));
     const have = mem.buffer.byteLength;
-    if (need > have) mem.grow(Math.ceil((need - have) / 65536));
+    if (need > have) {
+      try { mem.grow(Math.ceil((need - have) / 65536)); }
+      catch { throw new Error(`fm4: not enough memory (needs ${Math.ceil(need / 2 ** 20)} MB; wasm32 can address 4096 MB at most)`); }
+    }
   };
   const copyIn = (data, mode) => {
     ensure(data.length, mode);

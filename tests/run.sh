@@ -22,8 +22,8 @@ echo "builds: C$( [ $nb = 1 ] && echo ', BPL native')$( [ $nw = 1 ] && echo ', w
 
 # ---- every mode and level ----
 : > "$D/hashes"; : > "$D/wasm.list"
-# first in the wasm list (fresh instance): a stream with the largest bb, so the decode memory estimate has
-# to come from the stream's header, not from the input size (decode only: the wasm encoder has no BB)
+# first in the wasm list (fresh instance): a stream with the largest bb the encoder writes (20), so the decode
+# memory estimate has to come from the stream's header, not from the input size (decode only: no BB in wasm)
 if BB=20 $C enc 4 bytes "$D/in/text.txt" "$D/bb20.fm4"; then echo "$D/in/text.txt $D/bb20.fm4 - bytes" >> "$D/wasm.list"; else bad "C enc with BB=20"; fi
 if [ $nb = 1 ]; then $B dec "$D/bb20.fm4" "$D/d" && cmp -s "$D/d" "$D/in/text.txt" || bad "BPL decode of a bb=20 stream"; fi
 while read -r name mode args; do
@@ -51,6 +51,18 @@ audio_2.pcm audio 2
 video_64x48.rgb video 64 48
 EOF
 if [ $nw = 1 ]; then node "$R/tests/wasm_check.mjs" "$R/bpl" "$D/wasm.list" || bad "wasm"; fi
+
+# ---- bb 22 (earlier BB= experiments; the encoder now writes <= 20): native decoders read it, wasm (~4.4 GB of
+# tables) rejects it with an error ----
+$C dec "$R/tests/bb22/text.fm4" "$D/d" && cmp -s "$D/d" "$D/in/text.txt" || bad "C decode of a bb=22 stream"
+if [ $nb = 1 ]; then $B dec "$R/tests/bb22/text.fm4" "$D/d" && cmp -s "$D/d" "$D/in/text.txt" || bad "BPL decode of a bb=22 stream"; fi
+if [ $nw = 1 ]; then node -e '
+  const fs = require("fs");
+  import(require("url").pathToFileURL(process.argv[1] + "/fm4wasm.mjs").href).then(async ({ loadFm4Wasm }) => {
+    const fm4 = await loadFm4Wasm(fs.readFileSync(process.argv[1] + "/fm4.wasm"));
+    try { fm4.decode(new Uint8Array(fs.readFileSync(process.argv[2]))); console.log("decoded"); process.exit(1); }
+    catch (e) { process.exit(/not enough memory/.test(e.message) ? 0 : 1); }
+  });' "$R/bpl" "$R/tests/bb22/text.fm4" || bad "wasm: a bb=22 stream must fail with a clear out-of-memory error"; fi
 
 # ---- format 1 files (written by the previous encoder) still decode ----
 for t in "text.fm4 text.txt" "img_96.fm4 img_96.rgb" "ff.fm4 ff.bin"; do
