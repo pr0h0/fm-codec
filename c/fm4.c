@@ -58,7 +58,7 @@
 #define HDR1 28
 #define MBITS 22
 #define BB_MIN 12   /* table bits (log2 buckets per context) a file may use */
-#define BB_MAX 22
+#define BB_MAX 20   /* 2^20 buckets: about 1.2 GB of tables, so every accepted file also decodes in wasm32 (4 GB) */
 
 static int SQ_T[33] = {1, 2, 3, 6, 10, 16, 27, 45, 73, 120, 194, 310, 488, 747, 1101, 1546, 2047,
                        2549, 2994, 3348, 3607, 3785, 3901, 3975, 4022, 4050, 4068, 4079, 4085, 4089, 4092, 4093, 4094};

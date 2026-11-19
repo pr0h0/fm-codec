@@ -2309,7 +2309,7 @@ frame fm4Decode(f: *u8, n: long) ret long {
     if (mode > 3 || (mode == 2 && (width & 65535) == 0) || (mode == 3 && (width < 1 || width > 8))) {
         return -1;
     }
-    if (mode != 0 && (bb < 12 || bb > 22 || !paramsOk(mode, feat, feat2, width, limit, cast<int>(f[7])))) {
+    if (mode != 0 && (bb < 12 || bb > 20 || !paramsOk(mode, feat, feat2, width, limit, cast<int>(f[7])))) {
         return -1;
     }
     if (mode == 0 && L > n - hd) {
@@ -2467,7 +2467,7 @@ frame fm4Estimate(L: long, mode: int) ret long {
 # The same for decoding a stream whose header says bb (any value a decoder accepts).
 @[c_export]
 frame fm4EstimateDecode(L: long, mode: int, bb: int) ret long {
-    return estimateWith(L, mode, (bb < 12) ? 12 : ((bb > 22) ? 22 : bb));
+    return estimateWith(L, mode, (bb < 12) ? 12 : ((bb > 20) ? 20 : bb));
 }
 
 frame estimateWith(L: long, mode: int, bb: int) ret long {

@@ -22,6 +22,10 @@ echo "builds: C$( [ $nb = 1 ] && echo ', BPL native')$( [ $nw = 1 ] && echo ', w
 
 # ---- every mode and level ----
 : > "$D/hashes"; : > "$D/wasm.list"
+# first in the wasm list (fresh instance): a stream with the largest bb, so the decode memory estimate has
+# to come from the stream's header, not from the input size (decode only: the wasm encoder has no BB)
+BB=20 $C enc 4 bytes "$D/in/text.txt" "$D/bb20.fm4" && echo "$D/in/text.txt $D/bb20.fm4 - bytes" >> "$D/wasm.list"
+if [ $nb = 1 ]; then $B dec "$D/bb20.fm4" "$D/d" && cmp -s "$D/d" "$D/in/text.txt" || bad "BPL decode of a bb=20 stream"; fi
 while read -r name mode args; do
     for lv in 0 1 2 3 4 5; do
         f=$D/in/$name o=$D/$name.$lv.fm4
