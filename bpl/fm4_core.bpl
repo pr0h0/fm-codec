@@ -10,8 +10,19 @@
 # LLVM intrinsics (sqrtsd / f64.sqrt), which are correctly rounded like libm's.
 import malloc, free, memset, memcpy from "std/c.bpl";
 import sqrt, floor, prefetch from "std/intrinsics.bpl";
+extern exit(code: int);
 
 global HDR: long = 28;
+
+# Allocation failure ends the process with status 1 (native) or traps (wasm, the host gets an exception):
+# it comes from corrupt or hostile sizes and must not turn into a null dereference.
+frame xalloc(n: long) ret *u8 {
+    local p: *u8 = cast<*u8>(malloc(n));
+    if (p == nullptr) {
+        exit(1);
+    }
+    return p;
+}
 global SQ_T: *int = nullptr;
 global STRETCH: *int = nullptr;
 global RECIP: *int = nullptr;
@@ -91,12 +102,12 @@ frame initTables() {
     if (SQ_T != nullptr) {
         return;
     }
-    SQ_T = cast<*int>(malloc(33 * 4));
+    SQ_T = cast<*int>(xalloc(33 * 4));
     local vals: int[33] = [1, 2, 3, 6, 10, 16, 27, 45, 73, 120, 194, 310, 488, 747, 1101, 1546, 2047, 2549, 2994, 3348, 3607, 3785, 3901, 3975, 4022, 4050, 4068, 4079, 4085, 4089, 4092, 4093, 4094];
     loop (local i: int = 0; i < 33; i = i + 1) {
         SQ_T[i] = vals[i];
     }
-    STRETCH = cast<*int>(malloc(4096 * 4));
+    STRETCH = cast<*int>(xalloc(4096 * 4));
     local pi: int = 0;
     loop (local x: int = -2047; x <= 2047; x = x + 1) {
         local v: int = squash(x);
@@ -108,7 +119,7 @@ frame initTables() {
     loop (local j: int = pi; j < 4096; j = j + 1) {
         STRETCH[j] = 2047;
     }
-    RECIP = cast<*int>(malloc(256 * 4));
+    RECIP = cast<*int>(xalloc(256 * 4));
     loop (local n: int = 0; n < 256; n = n + 1) {
         RECIP[n] = 65536 / (2 * n + 3);
     }
@@ -490,7 +501,7 @@ frame arenaReset(total: long) {
         if (AR_RAW != nullptr) {
             free(cast<*void>(AR_RAW));
         }
-        arenaAdopt(cast<*u8>(malloc(total + 64)), total + 64);
+        arenaAdopt(cast<*u8>(xalloc(total + 64)), total + 64);
     }
     AR_USED = 0;
 }
@@ -2133,7 +2144,7 @@ frame ensureOut(L: long) {
         if (OB0 != nullptr) {
             free(cast<*void>(OB0));
         }
-        OB0 = cast<*u8>(malloc(need));
+        OB0 = cast<*u8>(xalloc(need));
         OB_CAP = need;
     }
 }
@@ -2327,7 +2338,7 @@ frame fm4InputBuffer(n: long) ret *u8 {
         if (IB != nullptr) {
             free(cast<*void>(IB));
         }
-        IB = cast<*u8>(malloc(n + 1));
+        IB = cast<*u8>(xalloc(n + 1));
         IB_CAP = n + 1;
     }
     return IB;
@@ -2361,4 +2372,5 @@ export fm4Decode;
 export fm4Result;
 export fm4InputBuffer;
 export fm4Estimate;
+export xalloc;
 export fm4SetArena;
