@@ -59,6 +59,9 @@ global OB0: *u8 = nullptr;
 global OB_CAP: long = 0;
 global DB: *u8 = nullptr;
 global DB_CAP: long = 0;
+global EXT_OUT: *u8 = nullptr;   # fm4UseBuffer(): the next result goes here instead of OB0 / DB
+global EXT_CAP: long = 0;
+global IN_SCRATCH: bool = false;   # fm4InputIsScratch(): the next fm4Encode need not restore its input
 global IB: *u8 = nullptr;
 global IB_CAP: long = 0;
 global RESULT: *u8 = nullptr;
@@ -672,7 +675,7 @@ frame arenaSize(mode: int, bb: int, feat: uint, feat2: uint, L: long, nchan: lon
     }
     if (aud) {
         # OLS blocks + scratch, aerr, actx, OLS counters
-        total = total + 2 * nchan * 1720 * 8 + 1640 * 8 + (L / 2 + 1) * 2 + 64 + 2 * nchan * 4;
+        total = total + 2 * nchan * 1720 * 8 + 1640 * 8 + 256 + 64 + 2 * nchan * 4;
     }
     # SM, W1, W2, W3, W4, WF, RP, RN, saved match predictors (3 * 64 u16 + 3 * 64 u8)
     total = total + 64 * 6 + 64 * 3 + 96 * 256 * 4 + 2048 * 96 * 2 + 768 * 96 * 2 + 2048 * 96 * 2 + 4096 * 96 * 2 + 256 * 4 * 4 + 96 * 64 * 2 + 96 * 64;
@@ -870,13 +873,13 @@ frame runChunk(mode: int, bb: int, limit: int, feat: uint, feat2: uint, widthF: 
     if (aud) {
         AO = cast<*double>(arenaTake(2 * nchan * 1720 * 8));
         AOm = cast<*double>(arenaTake(1640 * 8));
-        aerr = cast<*i16>(arenaTake((L / 2 + 1) * 2));
+        aerr = cast<*i16>(arenaTake(256));   # ring of 128: residuals are read back at most 8 frames x 8 channels
         actx = cast<*uint>(arenaTake(64));
         acnt = cast<*int>(arenaTake(2 * nchan * 4));
         if (first) {
             memset(cast<*void>(AO), 0, 2 * nchan * 1720 * 8);
             memset(cast<*void>(AOm), 0, 1640 * 8);
-            memset(cast<*void>(aerr), 0, (L / 2 + 1) * 2);
+            memset(cast<*void>(aerr), 0, 256);
             memset(cast<*void>(actx), 0, 64);
             memset(cast<*void>(acnt), 0, 2 * nchan * 4);
         }
@@ -1110,14 +1113,14 @@ frame runChunk(mode: int, bb: int, limit: int, feat: uint, feat2: uint, widthF: 
                     ap3 = 32767;
                 }
                 apred = ap1;
-                local ar1: int = (t > 0) ? cast<int>(aerr[si - nchan]) : 0;
-                local ar2: int = (t > 1) ? cast<int>(aerr[si - 2 * nchan]) : 0;
-                local ar3: int = (t > 2) ? cast<int>(aerr[si - 3 * nchan]) : 0;
-                local aro: int = (ach > 0 || t > 0) ? cast<int>(aerr[si - 1]) : 0;
+                local ar1: int = (t > 0) ? cast<int>(aerr[(si - nchan) & 127]) : 0;
+                local ar2: int = (t > 1) ? cast<int>(aerr[(si - 2 * nchan) & 127]) : 0;
+                local ar3: int = (t > 2) ? cast<int>(aerr[(si - 3 * nchan) & 127]) : 0;
+                local aro: int = (ach > 0 || t > 0) ? cast<int>(aerr[(si - 1) & 127]) : 0;
                 local ae8: int = 0;
                 loop (local k: int = 1; k <= 8; k = k + 1) {
                     if (t >= cast<long>(k)) {
-                        ae8 = ae8 + iabs(cast<int>(aerr[si - cast<long>(k) * nchan]));
+                        ae8 = ae8 + iabs(cast<int>(aerr[(si - cast<long>(k) * nchan) & 127]));
                     }
                 }
                 act = bitlen(iabs(ar1) + iabs(ar2) + iabs(ar3));
@@ -1958,7 +1961,7 @@ frame runChunk(mode: int, bb: int, limit: int, feat: uint, feat2: uint, widthF: 
                     data[i] = cast<u8>((dsv >> 8) & 255);
                 }
                 local asv: int = smp(data, sj);
-                aerr[sj] = cast<i16>(s16(asv - apred));
+                aerr[sj & 127] = cast<i16>(s16(asv - apred));
                 if (sj / nchan >= cast<long>(an1)) {
                     local achl: long = cast<long>(ach);
                     olsUpd(cast<*double>(ptrAdd(cast<*u8>(AO), achl * 1720 * 8)), AOm, an, &acnt[achl], 0.998, cast<double>(asv));
@@ -2252,13 +2255,33 @@ frame levelFeat2(level: int, mode: int) ret uint {
     return (mode == 2) ? il2[level] : bl2[level];
 }
 
+# The next fm4Encode / fm4Decode writes its result into p (cap bytes) instead of a buffer of its own, if it fits
+# (encode: L + 36 bytes, decode: L). The native CLI passes file mappings, so data larger than RAM never has
+# to be in memory at once.
+@[c_export]
+frame fm4UseBuffer(p: *u8, cap: long) {
+    EXT_OUT = p;
+    EXT_CAP = cap;
+}
+
+# The next fm4Encode's input is a copy nobody reads again: the E8/E9 pass is not undone afterwards (on a large
+# file-backed copy that would write every page a second time).
+@[c_export]
+frame fm4InputIsScratch() {
+    IN_SCRATCH = true;
+}
+
 # Encode; result in fm4Result(). Returns container length. data is restored after an E8/E9 pass.
 @[c_export]
 frame fm4Encode(level: int, mode: int, width: long, data: *u8, L: long) ret long {
     initTables();
-    ensureOut(L);
+    local best: *u8 = EXT_OUT;
+    if (best == nullptr || EXT_CAP < L + HDR) {
+        ensureOut(L);
+        best = OB0;
+    }
+    EXT_OUT = nullptr;
     LR = 4;
-    local best: *u8 = OB0;
     local bestLen: long = -1;
     G_CRC = crc32Of(data, L);
     if (level >= 1 && level <= 5) {
@@ -2274,10 +2297,12 @@ frame fm4Encode(level: int, mode: int, width: long, data: *u8, L: long) ret long
             feat = feat | cast<uint>(64);
         }
         bestLen = encodeOne(best, mode, bb, 255, feat, feat2, width, data, L);
-        if ((feat & cast<uint>(64)) != cast<uint>(0)) {
+        # undo the transform, unless the input is a scratch copy and the result is not stored (store copies data)
+        if ((feat & cast<uint>(64)) != cast<uint>(0) && (!IN_SCRATCH || bestLen < 0 || bestLen >= L + HDR)) {
             e8e9(data, L, false);
         }
     }
+    IN_SCRATCH = false;
     if (bestLen < 0 || bestLen >= L + HDR) {
         writeHeader(best, 0, 0, 0, 0, cast<uint>(0), cast<uint>(0), width, L, G_CRC);
         memcpy(cast<*void>(ptrAdd(best, HDR)), cast<*void>(data), L);
@@ -2293,6 +2318,9 @@ frame fm4Encode(level: int, mode: int, width: long, data: *u8, L: long) ret long
 @[c_export]
 frame fm4Decode(f: *u8, n: long) ret long {
     initTables();
+    local ext: *u8 = EXT_OUT;
+    local extCap: long = EXT_CAP;
+    EXT_OUT = nullptr;
     if (n < HDR1 || f[0] != cast<u8>(70) || f[1] != cast<u8>(77) || f[2] != cast<u8>(52) || f[3] < cast<u8>(1) || f[3] > cast<u8>(2)) {
         return -1;
     }
@@ -2325,19 +2353,23 @@ frame fm4Decode(f: *u8, n: long) ret long {
     if (mode == 3 && L % (2 * width) != 0) {
         return -1;
     }
-    if (L + 1 > DB_CAP) {
-        if (DB != nullptr) {
-            free(cast<*void>(DB));
+    local out: *u8 = ext;
+    if (out == nullptr || extCap < L) {
+        if (L + 1 > DB_CAP) {
+            if (DB != nullptr) {
+                free(cast<*void>(DB));
+            }
+            DB = cast<*u8>(malloc(L + 1));
+            DB_CAP = L + 1;
+            if (DB == nullptr) {
+                DB_CAP = 0;
+                return -1;
+            }
         }
-        DB = cast<*u8>(malloc(L + 1));
-        DB_CAP = L + 1;
-        if (DB == nullptr) {
-            DB_CAP = 0;
-            return -1;
-        }
+        out = DB;
     }
     if (mode == 0) {
-        memcpy(cast<*void>(DB), cast<*void>(ptrAdd(f, hd)), L);
+        memcpy(cast<*void>(out), cast<*void>(ptrAdd(f, hd)), L);
     } else {
         LR = cast<int>(f[7]);
         G_DEC = true;
@@ -2352,19 +2384,19 @@ frame fm4Decode(f: *u8, n: long) ret long {
         loop (local i: int = 0; i < 4; i = i + 1) {
             G_X = (G_X << 8) | nextByte();
         }
-        run(mode, bb, limit, feat, feat2, width, DB, L);
+        run(mode, bb, limit, feat, feat2, width, out, L);
         G_DEC = false;
         if (G_POS > G_END) {
             return -1;
         }
         if ((feat & cast<uint>(64)) != cast<uint>(0)) {
-            e8e9(DB, L, false);
+            e8e9(out, L, false);
         }
     }
-    if (v2 && crc32Of(DB, L) != get32(ptrAdd(f, 28))) {
+    if (v2 && crc32Of(out, L) != get32(ptrAdd(f, 28))) {
         return -1;
     }
-    RESULT = DB;
+    RESULT = out;
     return L;
 }
 
@@ -2500,5 +2532,8 @@ export fm4Estimate;
 export fm4EstimateDecode;
 export xalloc;
 export fm4StreamOk;
+export fm4UseBuffer;
+export fm4InputIsScratch;
+export e8e9Detect;
 export fm4AllowAnyParams;
 export fm4SetArena;

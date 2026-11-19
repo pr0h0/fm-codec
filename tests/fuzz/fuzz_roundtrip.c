@@ -26,6 +26,6 @@ int LLVMFuzzerTestOneInput(const uint8_t *d, size_t n) {
     if (memcmp(data, ref, L)) abort();   /* the encoder must leave its input as it found it */
     uint8_t *dec = fm4_decode(enc, m, &L2);
     if (!dec || L2 != L || memcmp(dec, ref, L)) abort();
-    free(dec); free(enc); free(data); free(ref);
+    free(dec); scratch_free(enc, ENC_CAP(L)); free(data); free(ref);
     return 0;
 }
