@@ -54,13 +54,12 @@ export async function loadFm4Wasm(source) {
     },
     decode(buf) {
       // header checks first (magic, version, format-2 CRC, table bits) so a corrupt byte can't size memory
+      const L = buf.length >= 28 ? Number(new DataView(buf.buffer, buf.byteOffset).getBigUint64(16, true)) : 0;
       const ok = buf.length >= 28 && buf[0] === 70 && buf[1] === 77 && buf[2] === 52 && (buf[3] === 1 || buf[3] === 2)
-        && streamOk(buf, Number(new DataView(buf.buffer, buf.byteOffset).getBigUint64(16, true)))
-        && (buf[4] === 0 || (buf[5] >= 12 && buf[5] <= 22));
+        && streamOk(buf, L) && (buf[4] === 0 || (buf[5] >= 12 && buf[5] <= 22));
       if (!ok) throw new Error("not an FM4 file");
-      const L = new DataView(buf.buffer, buf.byteOffset).getUint32(16, true);
       const m = buf[4];
-      ensure(Math.max(L, buf.length), m, buf.length > 5 ? buf[5] : 12);
+      ensure(Math.max(L, buf.length), m, buf[5]);   // a 64-bit L past the 2 GB the module handles is refused there
       const p = x.fm4InputBuffer(BigInt(buf.length)) >>> 0;
       new Uint8Array(mem.buffer, p, buf.length).set(buf);
       const n = Number(x.fm4Decode(p, BigInt(buf.length)));
