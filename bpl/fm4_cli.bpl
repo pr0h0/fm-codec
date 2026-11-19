@@ -2,7 +2,7 @@
 # fm4 enc LEVEL audio CHANNELS IN OUT | fm4 enc LEVEL video WIDTH HEIGHT IN OUT | fm4 dec IN OUT
 # fm4 enc|dec -t N ...: processes for segmented video (same FMV format and cut as c/fm4.c).
 import printf, malloc, strcmp, atoi from "std/c.bpl";
-import fm4Encode, fm4Decode, fm4Result, fm4Estimate, fm4SetArena, xalloc from "./fm4_core.bpl";
+import fm4Encode, fm4Decode, fm4Result, fm4Estimate, fm4SetArena, xalloc, fm4StreamOk from "./fm4_core.bpl";
 
 extern fopen(path: string, mode: string) ret *void;
 extern fread(buffer: *void, size: long, count: long, stream: *void) ret long;
@@ -213,7 +213,7 @@ frame decVideoSegments(f: *u8, n: long, threads: long, outp: **u8) ret long {
         }
         local m: long = get64(&f[pos]);
         local sl: long = get64(&f[pos + 24]);
-        if (m < 28 || m > n - pos - 8 || sl < 0 || sl > 1099511627776) {
+        if (m < 28 || m > n - pos - 8 || !fm4StreamOk(&f[pos + 8], m, sl)) {
             return -1;
         }
         ins[k] = &f[pos + 8];

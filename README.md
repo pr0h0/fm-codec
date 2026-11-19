@@ -105,7 +105,8 @@ c/fm4 x out.fma destdir                       # extract (also parallel)
 
 **Integrity:** files are format 2 (`FM4\x02`, 36-byte header, described at the top of `c/fm4.c`) with a
 CRC-32 of the header and of the original data. A corrupt file is rejected, never decoded to wrong data: the
-header CRC and a bound of L to about 2840x the payload stop a bad length before anything is allocated,
+header CRC and a bound of L to about 2840x the payload stop a bad length before anything is allocated
+(also for every stream of an archive or segmented video, before their lengths are added up),
 decoding stops once it reads past the payload, and the data CRC is checked at the end. Format 1 files still
 decode (without those checks). A new format version is introduced only when existing decoders could not
 read the files; decoders keep reading every earlier version.

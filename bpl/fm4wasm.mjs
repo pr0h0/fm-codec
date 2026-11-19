@@ -68,6 +68,16 @@ export async function loadFm4Wasm(source) {
 // FM4 stream)), coded one segment per worker; the file is the same for any thread count. Each worker
 // needs about 500 MB for a 64 MB video segment (600-800 MB for text). Without Worker (Node) it runs
 // inline, one segment after another.
+// CRC-32 (IEEE) and the per-stream check before a segment's length is added up and allocated (stream_ok in c/fm4.c)
+const CRC_T = Uint32Array.from({ length: 256 }, (_, i) => { let c = i; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
+const crc32 = (u8) => { let c = 0xFFFFFFFF; for (const b of u8) c = CRC_T[(c ^ b) & 255] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; };
+const streamOk = (s, L) => {
+  if (L > 2 ** 40) return false;
+  if (s[3] !== 2) return true;
+  if (s.length < 36 || new DataView(s.buffer, s.byteOffset).getUint32(32, true) !== crc32(s.subarray(0, 32))) return false;
+  return s[4] === 0 ? L <= s.length - 36 : Math.floor(L / 4096) <= s.length - 36;
+};
+
 export async function createFm4(source, { threads, workerUrl = new URL("./fm4worker.mjs", import.meta.url) } = {}) {
   if (typeof source === "string" || source instanceof URL) source = await fetch(source);
   const module = source instanceof WebAssembly.Module ? source
@@ -133,7 +143,7 @@ export async function createFm4(source, { threads, workerUrl = new URL("./fm4wor
       for (let k = 0; k < ns; k++) {
         if (n - pos < 36) throw new Error("not an FM4 file, or corrupt");
         const m = Number(dv.getBigUint64(pos, true)), L = Number(dv.getBigUint64(pos + 24, true));
-        if (m < 28 || m > n - pos - 8 || L > 2 ** 40) throw new Error("not an FM4 file, or corrupt");
+        if (m < 28 || m > n - pos - 8 || !streamOk(buf.subarray(pos + 8, pos + 8 + m), L)) throw new Error("not an FM4 file, or corrupt");
         segs.push([pos + 8, m, L]); all += L; pos += 8 + m;
       }
       if (pos !== n) throw new Error("not an FM4 file, or corrupt");

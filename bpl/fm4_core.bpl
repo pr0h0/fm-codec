@@ -16,8 +16,8 @@ extern puts(s: string) ret int;
 global HDR: long = 36;    # header size, format 2 (format 1: 28)
 global HDR1: long = 28;
 global CRC_T: *uint = nullptr;
-global G_END: long = 0;
-global G_CRC: uint = 0;   # CRC-32 of the data being encoded    # decoding stops once G_POS passes it (format 2)
+global G_END: long = 0;   # decoding stops once G_POS passes it (format 2)
+global G_CRC: uint = 0;   # CRC-32 of the data being encoded
 
 # Allocation failure ends the process with status 1 (native) or traps (wasm, the host gets an exception):
 # it comes from corrupt or hostile sizes and must not turn into a null dereference.
@@ -2360,6 +2360,23 @@ frame fm4Decode(f: *u8, n: long) ret long {
     return L;
 }
 
+# Container check of one FM4 stream (m bytes at s, decoded length L) before L is added up and allocated:
+# for format 2 the header CRC and the L bound, format 1 only the fixed cap (same as stream_ok in c/fm4.c).
+@[c_export]
+frame fm4StreamOk(s: *u8, m: long, L: long) ret bool {
+    initTables();
+    if (L < 0 || L > 1099511627776) {
+        return false;
+    }
+    if (s[3] != cast<u8>(2)) {
+        return true;
+    }
+    if (m < HDR || get32(ptrAdd(s, 32)) != crc32Of(s, 32)) {
+        return false;
+    }
+    return (s[4] == cast<u8>(0)) ? L <= m - HDR : L / 4096 <= m - HDR;
+}
+
 # Optional: give the codec its working memory (n bytes at p, allocated with malloc or compatible; the
 # codec frees it if it ever needs more). The native CLI passes huge-page memory here.
 @[c_export]
@@ -2417,4 +2434,5 @@ export fm4Result;
 export fm4InputBuffer;
 export fm4Estimate;
 export xalloc;
+export fm4StreamOk;
 export fm4SetArena;

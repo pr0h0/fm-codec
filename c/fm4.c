@@ -56,6 +56,8 @@
 #define HDR 36    /* header size, format 2 (format 1: 28) */
 #define HDR1 28
 #define MBITS 22
+#define BB_MIN 12   /* table bits (log2 buckets per context) a file may use */
+#define BB_MAX 22
 
 static int SQ_T[33] = {1, 2, 3, 6, 10, 16, 27, 45, 73, 120, 194, 310, 488, 747, 1101, 1546, 2047,
                        2549, 2994, 3348, 3607, 3785, 3901, 3975, 4022, 4050, 4068, 4079, 4085, 4089, 4092, 4093, 4094};
@@ -777,6 +779,7 @@ static uint8_t *fm4_encode(int level, int mode, int64_t width, uint8_t *data, in
     if (getenv("FEAT")) feat = (uint32_t)atoi(getenv("FEAT"));
     if (getenv("FEAT2")) feat2 = (uint32_t)atoi(getenv("FEAT2"));
     if (getenv("BB")) bb = atoi(getenv("BB"));
+    if (bb < BB_MIN || bb > BB_MAX) { fprintf(stderr, "BB must be %d-%d\n", BB_MIN, BB_MAX); exit(1); }
     uint8_t *best = NULL; int64_t bestLen = 0; uint32_t crc = crc32_of(data, L);
     if (level > 0) {
         feat &= ~64u;
@@ -798,6 +801,13 @@ static uint8_t *fm4_encode(int level, int mode, int64_t width, uint8_t *data, in
     *outLen = bestLen;
     return best;
 }
+/* Container check of one FM4 stream (m bytes at s) before its length is added up and allocated: what
+   fm4_decode checks first, for format 2 the header CRC and the L bound; format 1 only has the fixed cap. */
+static int stream_ok(const uint8_t *s, int64_t m, int64_t L) {
+    if (L < 0 || L > (int64_t)1 << 40) return 0;
+    if (s[3] != 2) return 1;
+    return m >= HDR && get32(s + 32) == crc32_of(s, 32) && (s[4] == 0 ? L <= m - HDR : L / 4096 <= m - HDR);
+}
 /* Format 2 (written): header CRC checked first, L bounded by the payload (no zero bytes are stripped, and every
    coded bit has p in [1, 4095]/4096 so costs at least log2(4096/4095) bits: at most ~2840 bytes per payload byte;
    50 MB of zeros: 2838), decoding stops at the end of the payload, and the CRC of the result must match.
@@ -809,7 +819,7 @@ static uint8_t *fm4_decode(uint8_t *f, int64_t n, int64_t *outLen) {
     int mode = f[4], bb = f[5], limit = f[6]; uint32_t feat = get32(f + 8), feat2 = get32(f + 24);
     int64_t width = get32(f + 12), L = (int64_t)get32(f + 16) | (int64_t)get32(f + 20) << 32;
     if (mode > 3 || (mode == 2 && !(width & 0xFFFF)) || (mode == 3 && (width < 1 || width > 8))) return NULL;   /* corrupt header */
-    if (mode && (bb < 12 || bb > 22)) return NULL;   /* table bits: the encoder writes 18 or 19 */
+    if (mode && (bb < BB_MIN || bb > BB_MAX)) return NULL;   /* the encoder never writes others */
     if (L < 0 || L > (int64_t)1 << 40 || (mode == 0 && L > n - hd) || (v2 && mode && L / 4096 > n - hd)) return NULL;
     uint8_t *data = xmalloc(L ? L : 1);
     if (mode == 0) memcpy(data, f + hd, L);
@@ -1007,8 +1017,8 @@ static int extract(const char *in, const char *dir, int threads) {
     for (int64_t pos = 8; pos < n; ) {   /* list the streams, then decode them all in parallel into one shared buffer */
         if (n - pos < 8 + HDR1) goto bad;
         int64_t m = get64(f + pos), L = get64(f + pos + 8 + 16);
-        if (m < HDR1 || m > n - pos - 8 || L < 0 || L > (int64_t)1 << 40 || all + L < all) goto bad;
-        if (nj == cap) jobs = realloc(jobs, (cap = 2 * cap + 16) * sizeof(Job));
+        if (m < HDR1 || m > n - pos - 8 || !stream_ok(f + pos + 8, m, L) || all + L < all) goto bad;
+        if (nj == cap) jobs = alloc_ok(realloc(jobs, (cap = 2 * cap + 16) * sizeof(Job)));
         jobs[nj] = (Job){0, 0, 0, L, m, f + pos + 8, NULL, 0};
         if (nj++ < nsolid) sn += L;
         all += L; pos += 8 + m;
@@ -1080,7 +1090,7 @@ static uint8_t *dec_video_segments(uint8_t *f, int64_t n, int threads, int64_t *
     for (int64_t k = 0; k < ns; k++) {
         if (n - pos < 8 + HDR1) return NULL;
         int64_t m = get64(f + pos), L = get64(f + pos + 8 + 16);
-        if (m < HDR1 || m > n - pos - 8 || L < 0 || L > (int64_t)1 << 40 || all + L < all) return NULL;
+        if (m < HDR1 || m > n - pos - 8 || !stream_ok(f + pos + 8, m, L) || all + L < all) return NULL;
         jobs[k] = (Job){0, 0, 0, L, m, f + pos + 8, NULL, 0};
         all += L; pos += 8 + m;
     }
