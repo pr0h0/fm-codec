@@ -2,7 +2,8 @@
  *
  *   fm4 enc LEVEL(0-5) bytes IN OUT | enc LEVEL image WIDTH IN OUT | enc LEVEL audio CHANNELS IN OUT
  *   | enc LEVEL video WIDTH HEIGHT IN OUT | dec IN OUT | a [-m auto|bytes] [-t N] LEVEL OUT PATH... | x [-t N] IN [DIR]
- *   experiments: env FEAT, FEAT2 (feature bits, override the level), BB (log2 buckets/table), LR, HUGE=0
+ *   experiments: env FEAT, FEAT2 (feature bits, override the level), BB (log2 buckets/table), LR, HUGE=0;
+ *   decoding files made with FEAT/FEAT2/LR needs FM4_ANY_FEAT=1 (C and the native BPL CLI; trusted input only)
  *
  * Container, format 2 (36-byte header, little endian):
  *   "FM4\x02" | mode u8 (0 store, 1 bytes, 2 image/video, 3 audio) | bb u8 | counter limit u8 | mixer lr u8
@@ -168,8 +169,14 @@ static inline void apm_upd(uint16_t *A, int aidx, int awt, int bit) {
     int j = awt >> 11 ? aidx + 1 : aidx;
     A[j] += (g - A[j]) >> 6;
 }
+/* p[0, unit) is set: repeat it over p[0, total) with doubling copies (memcpy is far faster than an element
+   loop, which matters for the many-MB tables of short inputs; same as fillRep in the BPL build) */
+static void fill_rep(void *p, size_t unit, size_t total) {
+    for (size_t have = unit; have < total; have *= 2) memcpy((char *)p + have, p, have < total - have ? have : total - have);
+}
 static void apm_init(uint16_t *A, int n) {
-    for (int k = 0; k < n; k++) for (int j = 0; j < 33; j++) A[k * 33 + j] = squash((j - 16) * 128) * 16;
+    for (int j = 0; j < 33; j++) A[j] = squash((j - 16) * 128) * 16;
+    fill_rep(A, 33 * 2, (size_t)n * 33 * 2);
 }
 
 #define OLSN 40
@@ -248,17 +255,16 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, uint32_t f
     for (int k = 0; k < nctx; k++) {
         size_t tsz = (size_t)16 << tb[k];
         T[k] = big_alloc(tsz * 4);
-        for (size_t j = 0; j < tsz; j++) T[k][j] = (j & 15) ? (32768 | 1u << 24) : 0;
+        for (size_t j = 0; j < 16; j++) T[k][j] = j ? (32768 | 1u << 24) : 0;
+        fill_rep(T[k], 64, tsz * 4);
     }
     uint32_t *SM = xmalloc(sizeof(uint32_t) * MAXIN * 256);
-    for (int j = 0; j < MAXIN * 256; j++) SM[j] = 32768;
+    SM[0] = 32768; fill_rep(SM, 4, sizeof(uint32_t) * MAXIN * 256);
     int32_t winit = 19661 * 6 / nin;
     int16_t *W1 = xmalloc(2 * 8 * 256 * MAXIN), *W2 = xmalloc(2 * 768 * MAXIN), *W3 = xmalloc(2 * 2048 * MAXIN), *W4 = xmalloc(2 * 4096 * MAXIN);
     int32_t *WF = xmalloc(sizeof(int32_t) * 256 * 4);
-    for (int j = 0; j < 8 * 256 * MAXIN; j++) W1[j] = winit >> 4;
-    for (int j = 0; j < 768 * MAXIN; j++) W2[j] = winit >> 4;
-    for (int j = 0; j < 2048 * MAXIN; j++) W3[j] = winit >> 4;
-    for (int j = 0; j < 4096 * MAXIN; j++) W4[j] = winit >> 4;
+    W1[0] = W2[0] = W3[0] = W4[0] = winit >> 4;
+    fill_rep(W1, 2, 2 * 8 * 256 * MAXIN); fill_rep(W2, 2, 2 * 768 * MAXIN); fill_rep(W3, 2, 2 * 2048 * MAXIN); fill_rep(W4, 2, 2 * 4096 * MAXIN);
     for (int j = 0; j < 256 * 4; j++) WF[j] = XM4 ? 16384 : 21845;
     int napm1 = img ? 256 * 16 * 3 : 65536;
     uint16_t *A1 = xmalloc(sizeof(uint16_t) * napm1 * 33); apm_init(A1, napm1);
@@ -627,7 +633,7 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, uint32_t f
             upd16(w1, st, nb, (bit << 12) - p1);
             if (fmix2) {
                 upd16(w2, st, nb, (bit << 12) - p2);
-                if (fmix3) { upd16(w3, st, nb, (bit << 12) - p3); if (XM4) upd16(w4, st, nb, (bit << 12) - p4); { int el = ((bit << 12) - pf) * LR; for (int k = 0; k < nm; k++) { int32_t nw = wf[k] + ((dd[k] * el) >> 14); wf[k] = nw > (1 << 19) - 1 ? (1 << 19) - 1 : (nw < -(1 << 19) ? -(1 << 19) : nw); } } }
+                if (fmix3) { upd16(w3, st, nb, (bit << 12) - p3); if (XM4) upd16(w4, st, nb, (bit << 12) - p4); { int el = ((bit << 12) - pf) * LR; for (int k = 0; k < nm; k++) { int32_t nw = wf[k] + ((int32_t)((uint32_t)dd[k] * (uint32_t)el) >> 14); wf[k] = nw > (1 << 19) - 1 ? (1 << 19) - 1 : (nw < -(1 << 19) ? -(1 << 19) : nw); } } }
                 apm_upd(A1, ai1, aw1, bit);
                 if (fapm2) apm_upd(A2, ai2, aw2, bit);
                 if (a3used) apm_upd(A3, ai3, aw3, bit);
@@ -719,8 +725,8 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, uint32_t f
         }
     }
     for (int k = 0; k < nctx; k++) free(T[k]);
-    free(SM); free(W1); free(W2); free(W3); free(WF); free(A1); free(A2); free(A3);
-    free(MT); free(MT2); free(IND1); free(IND2); free(err); free(perr); free(AO); free(aerr);
+    free(SM); free(W1); free(W2); free(W3); free(W4); free(WF); free(A1); free(A2); free(A3); free(OL);
+    free(MT); free(MT2); free(IND1); free(IND2); free(IMT); free(err); free(perr); free(AO); free(aerr); free(RP); free(RN);
 }
 
 static int e8e9_detect(const uint8_t *d, int64_t n) {
@@ -749,6 +755,7 @@ static uint32_t crc32_of(const uint8_t *p, int64_t n) {
     for (int64_t i = 0; i < n; i++) c = T[(c ^ p[i]) & 255] ^ (c >> 8);
     return c ^ 0xFFFFFFFFu;
 }
+static int64_t get64(const uint8_t *p) { return (int64_t)((uint64_t)get32(p) | (uint64_t)get32(p + 4) << 32); }   /* unsigned shift: no overflow UB */
 static void header(uint8_t *h, int mode, int bb, int limit, int lr, uint32_t feat, uint32_t feat2, int64_t width, int64_t L, uint32_t crc) {
     memcpy(h, "FM4\x02", 4); h[4] = mode; h[5] = bb; h[6] = limit; h[7] = lr;
     put32(h + 8, feat); put32(h + 12, (uint32_t)width); put32(h + 16, (uint32_t)L); put32(h + 20, (uint32_t)((uint64_t)L >> 32));
@@ -769,11 +776,27 @@ static void header(uint8_t *h, int mode, int bb, int limit, int lr, uint32_t fea
 #define I_L2 (1u << 20)
 #define I_L3 (I_L2 | 32)
 #define I_L4 (I_L3 | 256 | 512)
+static const uint32_t BL[6] = {0, B_L1, B_L2, B_L3, B_L4, B_L4}, IL[6] = {0, I_L1, I_L2, I_L3, I_L4, I_L4};
+static const uint32_t BL2[6] = {0, 0, 1, 1 | 4, 1 | 2 | 4, 1 | 2 | 4 | 8}, IL2[6] = {0, 0, 128, 128 | 64, 128 | 64 | 16 | 2, 128 | 64 | 16 | 2 | 32};
+static const uint32_t AL[6] = {0, 0, 32, 32 | 256, 32 | 256 | 2048, 32 | 256 | 2048}, AL2[6] = {0, 0, 0, 2, 2 | 32, 2 | 32};
+#define LEVEL_FEAT(mode, level) ((mode) == 2 ? IL[level] : (mode) == 3 ? AL[level] : BL[level])
+#define LEVEL_FEAT2(mode, level) ((mode) == 2 ? IL2[level] : (mode) == 3 ? AL2[level] : BL2[level])
+/* The model's array indexing is only valid for the feature sets the levels produce (other combinations can
+   index past the mixer weights), so a decoder accepts exactly those: per mode, levels 1-5, plus the x86
+   transform bit (bytes) and the video bit (image with a frame height, levels 2-5), counter limit 255 and a
+   mixer rate of 1-15. FM4_ANY_FEAT=1 lifts this for files from FEAT/FEAT2/LR experiments (trusted input only). */
+static int params_ok(int mode, uint32_t feat, uint32_t feat2, int64_t width, int limit, int lr) {
+    if (getenv("FM4_ANY_FEAT")) return 1;
+    if (limit != 255 || lr < 1 || lr > 15) return 0;
+    if (mode == 1) feat &= ~64u;
+    int video = mode == 2 && (feat2 & 256);
+    if (video) { if (!(width >> 16)) return 0; feat2 &= ~256u; }
+    for (int level = 1; level <= 5; level++)
+        if (feat == LEVEL_FEAT(mode, level) && feat2 == LEVEL_FEAT2(mode, level) && (!video || level >= 2) && !(mode == 2 && !video && level >= 2 && (width >> 16))) return 1;
+    return 0;
+}
 static uint8_t *fm4_encode(int level, int mode, int64_t width, uint8_t *data, int64_t L, int64_t *outLen) {
-    static const uint32_t BL[6] = {0, B_L1, B_L2, B_L3, B_L4, B_L4}, IL[6] = {0, I_L1, I_L2, I_L3, I_L4, I_L4};
-    static const uint32_t BL2[6] = {0, 0, 1, 1 | 4, 1 | 2 | 4, 1 | 2 | 4 | 8}, IL2[6] = {0, 0, 128, 128 | 64, 128 | 64 | 16 | 2, 128 | 64 | 16 | 2 | 32};
-    static const uint32_t AL[6] = {0, 0, 32, 32 | 256, 32 | 256 | 2048, 32 | 256 | 2048}, AL2[6] = {0, 0, 0, 2, 2 | 32, 2 | 32};
-    uint32_t feat = mode == 2 ? IL[level] : mode == 3 ? AL[level] : BL[level], feat2 = mode == 2 ? IL2[level] : mode == 3 ? AL2[level] : BL2[level];
+    uint32_t feat = LEVEL_FEAT(mode, level), feat2 = LEVEL_FEAT2(mode, level);
     int bb = level == 5 && mode == 1 ? 19 : 18, limit = 255;
     if (mode == 2 && (width >> 16) && (width & 0xFFFF) && level >= 2) feat2 |= 256;   /* video (a plain image 65536*k wide is not: run() would divide by width 0) */
     if (getenv("FEAT")) feat = (uint32_t)atoi(getenv("FEAT"));
@@ -817,11 +840,13 @@ static uint8_t *fm4_decode(uint8_t *f, int64_t n, int64_t *outLen) {
     if (n < HDR1 || memcmp(f, "FM4", 3) || f[3] < 1 || f[3] > 2) return NULL;
     int v2 = f[3] == 2, hd = v2 ? HDR : HDR1;
     int mode = f[4], bb = f[5], limit = f[6]; uint32_t feat = get32(f + 8), feat2 = get32(f + 24);
-    int64_t width = get32(f + 12), L = (int64_t)get32(f + 16) | (int64_t)get32(f + 20) << 32;
+    int64_t width = get32(f + 12), L = get64(f + 16);
     if (!stream_ok(f, n, L)) return NULL;   /* format 2: header CRC and L bound */
     if (mode > 3 || (mode == 2 && !(width & 0xFFFF)) || (mode == 3 && (width < 1 || width > 8))) return NULL;   /* corrupt header */
-    if (mode && (bb < BB_MIN || bb > BB_MAX)) return NULL;   /* the encoder never writes others */
+    if (mode && (bb < BB_MIN || bb > BB_MAX || !params_ok(mode, feat, feat2, width, limit, f[7]))) return NULL;   /* the encoder never writes others */
     if (mode == 0 && L > n - hd) return NULL;
+    /* whole pixels / frames / samples, as the encoder requires (else the last bytes would never be written) */
+    if ((mode == 2 && (L % (3 * (width & 0xFFFF)) || ((width >> 16) && L % (3 * (width & 0xFFFF) * (width >> 16))))) || (mode == 3 && L % (2 * width))) return NULL;
     uint8_t *data = xmalloc(L ? L : 1);
     if (mode == 0) memcpy(data, f + hd, L);
     else {
@@ -856,7 +881,6 @@ static int spit(const char *path, uint8_t *b, int64_t n) {
 typedef struct { char *path; uint8_t *d; int64_t size, a, b, width; int mode, perm; } Ent;
 static Ent *ents; static int nents;
 static void put64(uint8_t *p, uint64_t v) { for (int i = 0; i < 8; i++) p[i] = v >> (8 * i); }
-static int64_t get64(const uint8_t *p) { return (int64_t)get32(p) | (int64_t)get32(p + 4) << 32; }
 /* Lexical normalization in place: drops leading "/", empty and "." components, resolves ".." against the
    components before it, keeps a trailing "/" (empty directory entries). Returns how many ".." went above
    the start, i.e. would leave the base directory. No filesystem lookups, so symlinks are not resolved. */
@@ -1114,7 +1138,7 @@ int main(int argc, char **argv) {
         }
         if (argv[1][0] == 'x') { if (argc - k < 1 || argc - k > 2) goto usage; return extract(argv[k], argc - k == 2 ? argv[k + 1] : ".", threads); }
         if (argc < k + 3 || argv[k][0] < '0' || argv[k][0] > '5' || argv[k][1]) goto usage;
-        if (getenv("LR")) LR = atoi(getenv("LR"));
+        if (getenv("LR") && ((LR = atoi(getenv("LR"))) < 1 || LR > 15)) { fprintf(stderr, "LR must be 1-15\n"); return 2; }
         return archive(argv[k][0] - '0', media, threads, argv[k + 1], argv + k + 2, argc - k - 2);
     }
     int threads = sysconf(_SC_NPROCESSORS_ONLN);
@@ -1126,7 +1150,7 @@ int main(int argc, char **argv) {
         int level = atoi(argv[2]), video = !strcmp(argv[3], "video"), mode = !strcmp(argv[3], "image") || video ? 2 : !strcmp(argv[3], "audio") ? 3 : 1;
         int64_t width = mode >= 2 ? atoll(argv[4]) : 0, fheight = video ? atoll(argv[5]) : 0, L, n;
         if (level < 0 || level > 5 || (mode >= 2 && argc < 7 + video)) goto usage;
-        if (getenv("LR")) LR = atoi(getenv("LR"));
+        if (getenv("LR") && ((LR = atoi(getenv("LR"))) < 1 || LR > 15)) { fprintf(stderr, "LR must be 1-15\n"); return 2; }
         uint8_t *data = slurp(argv[(mode >= 2 ? 5 : 4) + video], &L);
         if (mode == 2 && (width <= 0 || width > 65535 || L % (3 * width))) { fprintf(stderr, "bad width\n"); return 1; }
         if (video && (width > 65535 || fheight <= 0 || fheight > 65535 || L % (3 * width * fheight))) { fprintf(stderr, "video: bad frame size\n"); return 1; }

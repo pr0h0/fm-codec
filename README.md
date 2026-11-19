@@ -92,6 +92,8 @@ output against `c/fm4` in headless Chromium. `loadFm4Wasm()` is the synchronous 
 ```bash
 make c bpl4 wasm4 BPL=~/Projects/bpl3/bpl     # BPL needs bpl3 staging 80d04313 or later
 make test                                     # tests/run.sh: all modes/levels, builds agree, archives, corrupt input
+make sanitize                                 # the same on ASan+UBSan and MSan builds of c/fm4 (clang)
+make fuzz                                     # libFuzzer: decoder and round trip, FUZZ_SECONDS each (tests/fuzz)
 c/fm4 enc 4 bytes in.txt out.fm4              # levels 0..5
 c/fm4 enc 4 image 2048 in.rgb out.fm4         # raw RGB24, width
 c/fm4 enc 4 audio 2 in.pcm out.fm4            # raw 16-bit little-endian PCM, channels
@@ -110,6 +112,12 @@ header CRC and a bound of L to about 2840x the payload stop a bad length before 
 decoding stops once it reads past the payload, and the data CRC is checked at the end. Format 1 files still
 decode (without those checks). A new format version is introduced only when existing decoders could not
 read the files; decoders keep reading every earlier version.
+Decoders accept only the parameter sets the encoder's levels write (feature bits, table size, counter
+limit, mixer rate) and whole pixels, frames or samples, since other combinations would index past the model's
+arrays; files from `FEAT`/`FEAT2`/`LR` experiments need `FM4_ANY_FEAT=1` to decode with `c/fm4` or `bpl/fm4`
+(trusted input only; the wasm build always rejects them).
+`tests/fuzz/replay.py` replays fuzzing corpora through C and BPL and requires identical results;
+`tests/hostile/` keeps the inputs fuzzing found.
 
 **Archives** (`FMA`, format described above `archive()` in `c/fm4.c`): all files are sorted by extension
 and compressed as one stream, so small similar files share context. The PCM data of 16-bit WAV files

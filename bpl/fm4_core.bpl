@@ -18,6 +18,7 @@ global HDR1: long = 28;
 global CRC_T: *uint = nullptr;
 global G_END: long = 0;   # decoding stops once G_POS passes it (format 2)
 global G_CRC: uint = 0;   # CRC-32 of the data being encoded
+global ANY_FEAT: bool = false;   # fm4AllowAnyParams(): accept files from FEAT/FEAT2/LR experiments (trusted input)
 
 # Allocation failure ends the process with status 1 (native) or traps (wasm, the host gets an exception):
 # it comes from corrupt or hostile sizes and must not turn into a null dereference.
@@ -2308,10 +2309,18 @@ frame fm4Decode(f: *u8, n: long) ret long {
     if (mode > 3 || (mode == 2 && (width & 65535) == 0) || (mode == 3 && (width < 1 || width > 8))) {
         return -1;
     }
-    if (mode != 0 && (bb < 12 || bb > 22)) {
+    if (mode != 0 && (bb < 12 || bb > 22 || !paramsOk(mode, feat, feat2, width, limit, cast<int>(f[7])))) {
         return -1;
     }
     if (mode == 0 && L > n - hd) {
+        return -1;
+    }
+    # whole pixels / frames / samples, as the encoder requires (else the last bytes would never be written)
+    local fw: long = width & 65535;
+    if (mode == 2 && (L % (3 * fw) != 0 || ((width >> 16) != 0 && L % (3 * fw * (width >> 16)) != 0))) {
+        return -1;
+    }
+    if (mode == 3 && L % (2 * width) != 0) {
         return -1;
     }
     if (L + 1 > DB_CAP) {
@@ -2355,6 +2364,43 @@ frame fm4Decode(f: *u8, n: long) ret long {
     }
     RESULT = DB;
     return L;
+}
+
+# The model's indexing is only valid for the feature sets the levels produce, so the decoder accepts exactly
+# those (params_ok in c/fm4.c): levels 1-5 of the mode, plus the x86 bit (bytes) and the video bit (image with a
+# frame height, levels 2-5), counter limit 255, mixer rate 1-15.
+frame paramsOk(mode: int, feat0: uint, feat20: uint, width: long, limit: int, lr: int) ret bool {
+    if (ANY_FEAT) {
+        return true;
+    }
+    if (limit != 255 || lr < 1 || lr > 15) {
+        return false;
+    }
+    local feat: uint = feat0;
+    local feat2: uint = feat20;
+    if (mode == 1) {
+        feat = feat & ~cast<uint>(64);
+    }
+    local video: bool = mode == 2 && (feat2 & cast<uint>(256)) != cast<uint>(0);
+    if (video) {
+        if ((width >> 16) == 0) {
+            return false;
+        }
+        feat2 = feat2 & ~cast<uint>(256);
+    }
+    loop (local level: int = 1; level <= 5; level = level + 1) {
+        if (feat == levelFeat(level, mode) && feat2 == levelFeat2(level, mode) && (!video || level >= 2) && !(mode == 2 && !video && level >= 2 && (width >> 16) != 0)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+# Lifts the paramsOk restriction for files from FEAT/FEAT2/LR experiments (the native CLI: FM4_ANY_FEAT=1).
+# Only for trusted input: other parameter sets can index past the model's arrays.
+@[c_export]
+frame fm4AllowAnyParams() {
+    ANY_FEAT = true;
 }
 
 # Checks of one FM4 stream (m >= 28 bytes at s, decoded length L) that need no decoding: the fixed cap, and for
@@ -2433,4 +2479,5 @@ export fm4InputBuffer;
 export fm4Estimate;
 export xalloc;
 export fm4StreamOk;
+export fm4AllowAnyParams;
 export fm4SetArena;

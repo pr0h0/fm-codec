@@ -27,7 +27,7 @@ testdata:
 	tools/make_testdata.sh
 
 clean:
-	rm -f c/fm c/fm2 c/fm3 c/fmx bpl/fm bpl/fm2 bpl/fm3 bpl/fm4 bpl/*.wasm bpl/*.ll
+	rm -f c/fm c/fm2 c/fm3 c/fm4 c/fm4-asan c/fm4-msan c/fmx bpl/fm bpl/fm2 bpl/fm3 bpl/fm4 bpl/*.wasm bpl/*.ll
 
 bpl3: bpl/fm3
 bpl/fm3: bpl/fm3_core.bpl bpl/fm3_cli.bpl
@@ -50,4 +50,15 @@ bpl/fm4.wasm: bpl/fm4_core.bpl bpl/fm4_wasm.bpl
 test: c/fm4
 	tests/run.sh
 
-.PHONY: bpl3 wasm3 bpl4 wasm4 all c bpl wasm testdata clean test
+# the test suite on sanitizer builds of c/fm4: ASan + UBSan, then MSan (clang)
+sanitize: c/fm4.c
+	clang -g -O1 -fsanitize=address,undefined -fno-sanitize-recover=undefined -ffp-contract=off -o c/fm4-asan c/fm4.c -lm
+	clang -g -O1 -fsanitize=memory -fsanitize-memory-track-origins -ffp-contract=off -o c/fm4-msan c/fm4.c -lm
+	FM4=$(CURDIR)/c/fm4-asan tests/run.sh
+	FM4=$(CURDIR)/c/fm4-msan tests/run.sh
+
+# libFuzzer: decoder (ASan + UBSan, and MSan) and encode/decode round trip, FUZZ_SECONDS each (default 60)
+fuzz: c/fm4
+	tests/fuzz/run.sh
+
+.PHONY: bpl3 wasm3 bpl4 wasm4 all c bpl wasm testdata clean test sanitize fuzz

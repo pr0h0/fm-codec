@@ -4,6 +4,8 @@
 # changes and platform differences). Builds that exist are tested: c/fm4 (required), bpl/fm4, bpl/fm4.wasm
 # (with node). UPDATE=1 rewrites tests/expected.txt. FM4=path overrides the C binary (e.g. a sanitizer build).
 set -u
+# sanitizer builds (FM4=...): report errors with status 99, which the corrupt-input checks don't accept
+export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0}:exitcode=99" UBSAN_OPTIONS="${UBSAN_OPTIONS:-print_stacktrace=1}:exitcode=99" MSAN_OPTIONS="${MSAN_OPTIONS:-}:exitcode=99"
 R=$(cd "$(dirname "$0")/.." && pwd)
 C=${FM4:-$R/c/fm4}
 B=$R/bpl/fm4
@@ -51,6 +53,14 @@ for t in "text.fm4 text.txt" "img_96.fm4 img_96.rgb" "ff.fm4 ff.bin"; do
     set -- $t
     $C dec "$R/tests/v1/$1" "$D/d" && cmp -s "$D/d" "$D/in/$2" || bad "C format 1 decode $1"
     if [ $nb = 1 ]; then $B dec "$R/tests/v1/$1" "$D/d" && cmp -s "$D/d" "$D/in/$2" || bad "BPL format 1 decode $1"; fi
+done
+
+# ---- hostile files found by fuzzing (tests/fuzz): each must be rejected, without a crash ----
+for h in "$R"/tests/hostile/*.fm4; do
+    for bin in "$C" $( [ $nb = 1 ] && echo "$B" ); do
+        $T $bin dec "$h" "$D/d" >/dev/null 2>&1; rc=$?
+        [ $rc = 1 ] || bad "${bin#$R/} dec tests/hostile/$(basename "$h"): exit status $rc (want 1)"
+    done
 done
 
 # ---- segmented video: same file for any thread count and build ----
