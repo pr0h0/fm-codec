@@ -7,8 +7,9 @@ import os, struct, subprocess, sys, tempfile, zlib
 
 enc = sys.argv[1] == "--enc"
 c_bin, b_bin, corpus = sys.argv[1 + enc:4 + enc]
-# the encoder's experiment overrides would change what a level writes (and what the --enc check encodes)
-clean = {k: v for k, v in os.environ.items() if k not in ("FEAT", "FEAT2", "LR", "BB")}
+# experiment overrides would change what a level writes and what the --enc check encodes, and FM4_ANY_FEAT
+# would turn off the decoder checks this replay tests
+clean = {k: v for k, v in os.environ.items() if k not in ("FEAT", "FEAT2", "LR", "BB", "FM4_ANY_FEAT")}
 
 def level_tables():
     """(feat, feat2) per mode and level, read from files c/fm4 encodes (no copy of the tables to go stale)."""
