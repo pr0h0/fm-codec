@@ -85,7 +85,7 @@ const back = await fm4.decode(packed);
 All coding runs in Web Workers (module workers: Chrome 91+, Firefox 114+, Safari 16.4+), so the page
 stays responsive; video segments are coded one per worker. Each worker typically needs 300-800 MB of
 wasm memory (about 500 MB for a 64 MB video segment), less for inputs under 64 KB (2 KB: about 80 MB),
-hence the default of at most 4. Single streams run at about
+hence the default of at most 4. (Files from `BB=21`/`22` experiments need ~4.4 GB and decode only natively.) Single streams run at about
 half the native speed; only segmented video runs in parallel. `bench/browser/fm4_browser.sh` checks the
 output against `c/fm4` in headless Chromium. `loadFm4Wasm()` is the synchronous single-instance API
 (Node, Bun, inside a worker).

@@ -58,7 +58,8 @@
 #define HDR1 28
 #define MBITS 22
 #define BB_MIN 12   /* table bits (log2 buckets per context) a file may use */
-#define BB_MAX 20   /* 2^20 buckets: about 1.2 GB of tables, so every accepted file also decodes in wasm32 (4 GB) */
+#define BB_MAX 20   /* the encoder writes at most 2^20 buckets (~1.2 GB of tables): every new file decodes in wasm32 */
+#define BB_DEC_MAX 22   /* decoders also read 21-22 (earlier BB= experiments; ~4.4 GB, native builds only) */
 
 static int SQ_T[33] = {1, 2, 3, 6, 10, 16, 27, 45, 73, 120, 194, 310, 488, 747, 1101, 1546, 2047,
                        2549, 2994, 3348, 3607, 3785, 3901, 3975, 4022, 4050, 4068, 4079, 4085, 4089, 4092, 4093, 4094};
@@ -847,7 +848,7 @@ static uint8_t *fm4_decode(uint8_t *f, int64_t n, int64_t *outLen) {
     int64_t width = get32(f + 12), L = get64(f + 16);
     if (!stream_ok(f, n, L)) return NULL;   /* format 2: header CRC and L bound */
     if (mode > 3 || (mode == 2 && !(width & 0xFFFF)) || (mode == 3 && (width < 1 || width > 8))) return NULL;   /* corrupt header */
-    if (mode && (bb < BB_MIN || bb > BB_MAX || !params_ok(mode, feat, feat2, width, limit, f[7]))) return NULL;   /* the encoder never writes others */
+    if (mode && (bb < BB_MIN || bb > BB_DEC_MAX || !params_ok(mode, feat, feat2, width, limit, f[7]))) return NULL;   /* the encoder never writes others */
     if (mode == 0 && L > n - hd) return NULL;
     /* whole pixels / frames / samples, as the encoder requires (else the last bytes would never be written) */
     if ((mode == 2 && (L % (3 * (width & 0xFFFF)) || ((width >> 16) && L % (3 * (width & 0xFFFF) * (width >> 16))))) || (mode == 3 && L % (2 * width))) return NULL;

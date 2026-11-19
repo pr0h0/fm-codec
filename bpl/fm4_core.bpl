@@ -15,6 +15,8 @@ extern puts(s: string) ret int;
 
 global HDR: long = 36;    # header size, format 2 (format 1: 28)
 global HDR1: long = 28;
+global BB_MIN: int = 12;       # table bits a stream may use (c/fm4.c BB_MIN, BB_DEC_MAX); the encoder writes <= 20
+global BB_DEC_MAX: int = 22;
 global CRC_T: *uint = nullptr;
 global G_END: long = 0;   # decoding stops once G_POS passes it (format 2)
 global G_CRC: uint = 0;   # CRC-32 of the data being encoded
@@ -2309,7 +2311,7 @@ frame fm4Decode(f: *u8, n: long) ret long {
     if (mode > 3 || (mode == 2 && (width & 65535) == 0) || (mode == 3 && (width < 1 || width > 8))) {
         return -1;
     }
-    if (mode != 0 && (bb < 12 || bb > 20 || !paramsOk(mode, feat, feat2, width, limit, cast<int>(f[7])))) {
+    if (mode != 0 && (bb < BB_MIN || bb > BB_DEC_MAX || !paramsOk(mode, feat, feat2, width, limit, cast<int>(f[7])))) {
         return -1;
     }
     if (mode == 0 && L > n - hd) {
@@ -2451,7 +2453,7 @@ frame fm4InputBuffer(n: long) ret *u8 {
 
 # Table bits for L bytes: the level's default, or less for short inputs (2^(bb-2) >= L), as in c/fm4.c.
 frame bbFor(L: long, dflt: int) ret int {
-    local bb: int = 12;
+    local bb: int = BB_MIN;
     loop (bb < dflt && (cast<long>(1) << cast<long>(bb - 2)) < L) {
         bb = bb + 1;
     }
@@ -2467,7 +2469,7 @@ frame fm4Estimate(L: long, mode: int) ret long {
 # The same for decoding a stream whose header says bb (any value a decoder accepts).
 @[c_export]
 frame fm4EstimateDecode(L: long, mode: int, bb: int) ret long {
-    return estimateWith(L, mode, (bb < 12) ? 12 : ((bb > 20) ? 20 : bb));
+    return estimateWith(L, mode, (bb < BB_MIN) ? BB_MIN : ((bb > BB_DEC_MAX) ? BB_DEC_MAX : bb));
 }
 
 frame estimateWith(L: long, mode: int, bb: int) ret long {
