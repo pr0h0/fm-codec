@@ -20,9 +20,11 @@ export async function loadFm4Wasm(source) {
     const top = x.malloc(0n) >>> 0;                       // current heap cursor
     const need = top + Number(bb < 0 ? x.fm4Estimate(BigInt(L), mode) : x.fm4EstimateDecode(BigInt(L), mode, bb));
     const have = mem.buffer.byteLength;
+    // the module's allocator takes sizes below 2 GB (a bb 21-22 stream needs more: native builds only)
+    if (need >= 2 ** 31) throw new Error(`fm4: not enough memory: needs ${Math.ceil(need / 2 ** 20)} MB, the wasm build handles up to 2048 MB`);
     if (need > have) {
       try { mem.grow(Math.ceil((need - have) / 65536)); }
-      catch { throw new Error(`fm4: not enough memory (needs ${Math.ceil(need / 2 ** 20)} MB; wasm32 can address 4096 MB at most)`); }
+      catch { throw new Error(`fm4: not enough memory: could not grow wasm memory to ${Math.ceil(need / 2 ** 20)} MB (the engine's limit; 4096 MB at most in wasm32)`); }
     }
   };
   const copyIn = (data, mode) => {
@@ -51,7 +53,12 @@ export async function loadFm4Wasm(source) {
       return copyOut(n);
     },
     decode(buf) {
-      const L = buf.length >= 28 ? new DataView(buf.buffer, buf.byteOffset).getUint32(16, true) : 0;
+      // header checks first (magic, version, format-2 CRC, table bits) so a corrupt byte can't size memory
+      const ok = buf.length >= 28 && buf[0] === 70 && buf[1] === 77 && buf[2] === 52 && (buf[3] === 1 || buf[3] === 2)
+        && streamOk(buf, Number(new DataView(buf.buffer, buf.byteOffset).getBigUint64(16, true)))
+        && (buf[4] === 0 || (buf[5] >= 12 && buf[5] <= 22));
+      if (!ok) throw new Error("not an FM4 file");
+      const L = new DataView(buf.buffer, buf.byteOffset).getUint32(16, true);
       const m = buf[4];
       ensure(Math.max(L, buf.length), m, buf.length > 5 ? buf[5] : 12);
       const p = x.fm4InputBuffer(BigInt(buf.length)) >>> 0;

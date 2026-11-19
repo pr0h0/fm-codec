@@ -52,17 +52,18 @@ video_64x48.rgb video 64 48
 EOF
 if [ $nw = 1 ]; then node "$R/tests/wasm_check.mjs" "$R/bpl" "$D/wasm.list" || bad "wasm"; fi
 
-# ---- bb 22 (earlier BB= experiments; the encoder now writes <= 20): native decoders read it, wasm (~4.4 GB of
-# tables) rejects it with an error ----
-$C dec "$R/tests/bb22/text.fm4" "$D/d" && cmp -s "$D/d" "$D/in/text.txt" || bad "C decode of a bb=22 stream"
-if [ $nb = 1 ]; then $B dec "$R/tests/bb22/text.fm4" "$D/d" && cmp -s "$D/d" "$D/in/text.txt" || bad "BPL decode of a bb=22 stream"; fi
+# ---- table bits above 20 (decoders accept 21-22 from earlier BB= experiments; the encoder now writes <= 20) ----
+# native decoders read a bb 21 stream (~2.3 GB of tables; bb 22 would need ~4.5 GB, too much for CI runners);
+# wasm (up to 2 GB) must reject it with a clear error before allocating any of it
+$C dec "$R/tests/large_bb/bb21.fm4" "$D/d" && cmp -s "$D/d" "$D/in/text.txt" || bad "C decode of a bb=21 stream"
+if [ $nb = 1 ]; then $B dec "$R/tests/large_bb/bb21.fm4" "$D/d" && cmp -s "$D/d" "$D/in/text.txt" || bad "BPL decode of a bb=21 stream"; fi
 if [ $nw = 1 ]; then node -e '
   const fs = require("fs");
   import(require("url").pathToFileURL(process.argv[1] + "/fm4wasm.mjs").href).then(async ({ loadFm4Wasm }) => {
     const fm4 = await loadFm4Wasm(fs.readFileSync(process.argv[1] + "/fm4.wasm"));
     try { fm4.decode(new Uint8Array(fs.readFileSync(process.argv[2]))); console.log("decoded"); process.exit(1); }
     catch (e) { process.exit(/not enough memory/.test(e.message) ? 0 : 1); }
-  });' "$R/bpl" "$R/tests/bb22/text.fm4" || bad "wasm: a bb=22 stream must fail with a clear out-of-memory error"; fi
+  });' "$R/bpl" "$R/tests/large_bb/bb21.fm4" || bad "wasm: a bb=21 stream must fail with a clear out-of-memory error"; fi
 
 # ---- format 1 files (written by the previous encoder) still decode ----
 for t in "text.fm4 text.txt" "img_96.fm4 img_96.rgb" "ff.fm4 ff.bin"; do
