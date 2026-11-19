@@ -177,7 +177,12 @@ python3 -c "
 import struct, sys
 d = bytearray(open(sys.argv[1], 'rb').read()); d[16:24] = struct.pack('<Q', 1 << 39)
 open(sys.argv[2], 'wb').write(d)" "$R/tests/v1/text.fm4" "$D/big/v1huge.fm4"
-(cd "$D/big" && FM4_BIG=1 $T $C dec v1huge.fm4 huge.out >/dev/null 2>&1; [ $? -le 1 ] && [ -z "$(ls -A . | grep '^huge\.out')" ]) || bad "format-1 huge length went to a file"
+# (with vm.overcommit_memory=1 the allocation succeeds and decoding just runs: then a timeout is fine too; the
+# point is that no output file appears)
+if [ -n "$T" ]; then
+    (cd "$D/big" && FM4_BIG=1 timeout 10 $C dec v1huge.fm4 huge.out >/dev/null 2>&1; rc=$?
+     { [ $rc -le 1 ] || [ $rc = 124 ] || [ $rc = 137 ]; } && [ -z "$(ls -A . | grep '^huge\.out')" ]) || bad "format-1 huge length went to a file"
+fi
 
 # ---- locked hashes ----
 if [ "${UPDATE:-0}" = 1 ]; then cp "$D/hashes" "$R/tests/expected.txt"; echo "tests/expected.txt updated"

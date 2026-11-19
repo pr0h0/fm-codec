@@ -67,6 +67,7 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <sys/wait.h>
 #endif
 
@@ -993,16 +994,26 @@ static uint8_t *map_in(const char *path, int64_t *n) {
    is decoded into memory, where an absurd length fails at the allocation. Windows: memory, written at the end. */
 typedef struct { const char *path; char tmp[4200]; uint8_t *p; int64_t n; int mapped, v2, ioerr; } Out;
 static int spit(const char *path, uint8_t *b, int64_t n);
+#ifndef NO_FORK
+/* an interrupted decode removes its temporary output (it has the full size reserved) */
+static char PENDING[4200];
+static void on_signal(int sig) { if (PENDING[0]) unlink(PENDING); _exit(128 + sig); }
+static void pending(const char *t) {
+    snprintf(PENDING, sizeof PENDING, "%s", t ? t : "");
+    if (t) { signal(SIGINT, on_signal); signal(SIGTERM, on_signal); signal(SIGHUP, on_signal); }
+}
+#endif
 static uint8_t *out_open(Out *o, int64_t n, int to_file) {
     o->n = n; o->mapped = 0;
 #ifndef NO_FORK
     if (to_file && n > 0) {
-        snprintf(o->tmp, sizeof o->tmp, "%s.XXXXXX", o->path);
+        snprintf(o->tmp, sizeof o->tmp, "%s.fm4-XXXXXX", o->path);   /* recognisable if a crash leaves it */
         int fd = mkstemp(o->tmp);
         if (fd < 0) { perror(o->tmp); o->ioerr = 1; return NULL; }
+        pending(o->tmp);
         mode_t um = umask(0); umask(um); fchmod(fd, 0666 & ~um);   /* the permissions fopen would give */
         void *p = reserve(fd, n) ? NULL : map_fd(fd, n, 1);
-        if (!p) { perror(o->path); close(fd); unlink(o->tmp); o->ioerr = 1; return NULL; }
+        if (!p) { perror(o->path); close(fd); unlink(o->tmp); pending(NULL); o->ioerr = 1; return NULL; }
         close(fd); o->mapped = 1;
         return o->p = p;
     }
@@ -1014,9 +1025,9 @@ static int out_close(Out *o, int ok) {   /* 0: published */
 #ifndef NO_FORK
     if (o->mapped) {
         if (munmap(o->p, o->n)) { perror(o->path); ok = 0; }
-        if (!ok) { unlink(o->tmp); return 1; }
-        if (rename(o->tmp, o->path)) { perror(o->path); unlink(o->tmp); o->ioerr = 1; return 1; }
-        return 0;
+        if (!ok) { unlink(o->tmp); pending(NULL); return 1; }
+        if (rename(o->tmp, o->path)) { perror(o->path); unlink(o->tmp); pending(NULL); o->ioerr = 1; return 1; }
+        pending(NULL); return 0;
     }
 #endif
     int r = ok ? spit(o->path, o->p, o->n) : 1;

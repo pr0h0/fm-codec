@@ -61,6 +61,7 @@ global DB: *u8 = nullptr;
 global DB_CAP: long = 0;
 global EXT_OUT: *u8 = nullptr;   # fm4UseBuffer(): the next result goes here instead of OB0 / DB
 global EXT_CAP: long = 0;
+global IN_SCRATCH: bool = false;   # fm4InputIsScratch(): the next fm4Encode need not restore its input
 global IB: *u8 = nullptr;
 global IB_CAP: long = 0;
 global RESULT: *u8 = nullptr;
@@ -2263,6 +2264,13 @@ frame fm4UseBuffer(p: *u8, cap: long) {
     EXT_CAP = cap;
 }
 
+# The next fm4Encode's input is a copy nobody reads again: the E8/E9 pass is not undone afterwards (on a large
+# file-backed copy that would write every page a second time).
+@[c_export]
+frame fm4InputIsScratch() {
+    IN_SCRATCH = true;
+}
+
 # Encode; result in fm4Result(). Returns container length. data is restored after an E8/E9 pass.
 @[c_export]
 frame fm4Encode(level: int, mode: int, width: long, data: *u8, L: long) ret long {
@@ -2289,10 +2297,12 @@ frame fm4Encode(level: int, mode: int, width: long, data: *u8, L: long) ret long
             feat = feat | cast<uint>(64);
         }
         bestLen = encodeOne(best, mode, bb, 255, feat, feat2, width, data, L);
-        if ((feat & cast<uint>(64)) != cast<uint>(0)) {
+        # undo the transform, unless the input is a scratch copy and the result is not stored (store copies data)
+        if ((feat & cast<uint>(64)) != cast<uint>(0) && (!IN_SCRATCH || bestLen < 0 || bestLen >= L + HDR)) {
             e8e9(data, L, false);
         }
     }
+    IN_SCRATCH = false;
     if (bestLen < 0 || bestLen >= L + HDR) {
         writeHeader(best, 0, 0, 0, 0, cast<uint>(0), cast<uint>(0), width, L, G_CRC);
         memcpy(cast<*void>(ptrAdd(best, HDR)), cast<*void>(data), L);
@@ -2523,6 +2533,7 @@ export fm4EstimateDecode;
 export xalloc;
 export fm4StreamOk;
 export fm4UseBuffer;
+export fm4InputIsScratch;
 export e8e9Detect;
 export fm4AllowAnyParams;
 export fm4SetArena;

@@ -2,7 +2,7 @@
 # fm4 enc LEVEL audio CHANNELS IN OUT | fm4 enc LEVEL video WIDTH HEIGHT IN OUT | fm4 dec IN OUT
 # fm4 enc|dec -t N ...: processes for segmented video (same FMV format and cut as c/fm4.c).
 import printf, malloc, strcmp, atoi, snprintf from "std/c.bpl";
-import fm4Encode, fm4Decode, fm4Result, fm4Estimate, fm4EstimateDecode, fm4SetArena, xalloc, fm4StreamOk, fm4AllowAnyParams, fm4UseBuffer, e8e9Detect from "./fm4_core.bpl";
+import fm4Encode, fm4Decode, fm4Result, fm4Estimate, fm4EstimateDecode, fm4SetArena, xalloc, fm4StreamOk, fm4AllowAnyParams, fm4UseBuffer, fm4InputIsScratch, e8e9Detect from "./fm4_core.bpl";
 
 extern fopen(path: string, mode: string) ret *void;
 extern fread(buffer: *void, size: long, count: long, stream: *void) ret long;
@@ -36,6 +36,7 @@ extern free(p: *void);
 extern posix_fallocate(fd: int, off: long, n: long) ret int;
 extern fchmod(fd: int, mode: int) ret int;
 extern umask(mode: int) ret int;
+extern signal(sig: int, handler: Func<void>(int)) ret *void;
 
 global HDR_MAX: long = 36;   # 28-byte FM4 header + 8 (stream may exceed L by the header plus a little)
 global USAGE: string = "usage: fm4 enc LEVEL(0-5) bytes IN OUT | fm4 enc LEVEL image WIDTH IN OUT | fm4 enc LEVEL audio CHANNELS IN OUT | fm4 enc LEVEL video WIDTH HEIGHT IN OUT | fm4 dec IN OUT | fm4 enc|dec -t N ...\n";
@@ -139,17 +140,29 @@ frame mapIn(path: string, outLen: *long) ret *u8 {
 # is touched) with its space reserved; finishOut renames it to path, or removes it on failure. Only for format-2
 # lengths, which are bounded by the input (see Out in c/fm4.c); format 1 decodes into memory.
 global OUT_TMP: string = "";
+global PENDING: bool = false;   # OUT_TMP exists and an interrupted run removes it (its full size is reserved)
 global IO_ERR: bool = false;   # an I/O error was already reported (not a corrupt file)
+
+frame onSignal(sig: int) {
+    if (PENDING) {
+        unlink(OUT_TMP);
+    }
+    _exit(128 + sig);
+}
 
 frame mapOut(path: string, n: long) ret *u8 {
     OUT_TMP = cast<string>(xalloc(4200));
-    snprintf(OUT_TMP, 4200, "%s.XXXXXX", path);
+    snprintf(OUT_TMP, 4200, "%s.fm4-XXXXXX", path);   # recognisable if a crash leaves it
     local fd: int = mkstemp(OUT_TMP);
     if (fd < 0) {
         printf("cannot write %s\n", path);
         IO_ERR = true;
         return nullptr;
     }
+    PENDING = true;
+    signal(2, onSignal);    # SIGINT
+    signal(15, onSignal);   # SIGTERM
+    signal(1, onSignal);    # SIGHUP
     local um: int = umask(0);
     umask(um);
     fchmod(fd, 438 & ~um);   # 0666 minus umask, what fopen gives
@@ -163,6 +176,7 @@ frame mapOut(path: string, n: long) ret *u8 {
     if (p == nullptr) {
         printf("cannot write %s (disk full?)\n", path);
         unlink(OUT_TMP);
+        PENDING = false;
         IO_ERR = true;
     }
     return p;
@@ -175,6 +189,7 @@ frame finishOut(path: string, p: *u8, n: long, ok: bool) ret int {
     } else if (munmap(cast<*void>(p), n) != 0) {
         good = false;
     }
+    PENDING = false;
     if (!good) {
         unlink(OUT_TMP);
         return 1;
@@ -210,8 +225,11 @@ frame spit(path: string, b: *u8, n: long) ret int {
         printf("cannot write %s\n", path);
         return 1;
     }
-    fwrite(cast<*void>(b), 1, n, f);
-    fclose(f);
+    local w: long = fwrite(cast<*void>(b), 1, n, f);
+    if (fclose(f) != 0 || w != n) {
+        printf("cannot write %s\n", path);
+        return 1;
+    }
     return 0;
 }
 
@@ -485,6 +503,7 @@ frame main(argc: int, argv: *string) ret int {
             if (cp != nullptr) {
                 memcpy(cast<*void>(cp), cast<*void>(data), L);
                 data = cp;
+                fm4InputIsScratch();   # no need to undo the transform on the copy afterwards
             }
         }
         if (L + 36 >= BIG) {
