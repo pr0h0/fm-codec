@@ -37,6 +37,9 @@ extern posix_fallocate(fd: int, off: long, n: long) ret int;
 extern fchmod(fd: int, mode: int) ret int;
 extern umask(mode: int) ret int;
 extern signal(sig: int, handler: Func<void>(int)) ret *void;
+extern sysv_signal(sig: int, handler: *void) ret *void;   # sets SIG_DFL (0) / SIG_IGN (1) / a saved handler
+extern kill(pid: int, sig: int) ret int;
+extern getpid() ret int;
 
 global HDR_MAX: long = 36;   # 28-byte FM4 header + 8 (stream may exceed L by the header plus a little)
 global USAGE: string = "usage: fm4 enc LEVEL(0-5) bytes IN OUT | fm4 enc LEVEL image WIDTH IN OUT | fm4 enc LEVEL audio CHANNELS IN OUT | fm4 enc LEVEL video WIDTH HEIGHT IN OUT | fm4 dec IN OUT | fm4 enc|dec -t N ...\n";
@@ -143,11 +146,45 @@ global OUT_TMP: string = "";
 global PENDING: bool = false;   # OUT_TMP exists and an interrupted run removes it (its full size is reserved)
 global IO_ERR: bool = false;   # an I/O error was already reported (not a corrupt file)
 
+# An interrupted decode removes its temporary output, then dies of the signal (the shell sees a signal death).
+# Ignored signals (nohup, background jobs) stay ignored; the earlier handlers come back afterwards (as c/fm4.c).
+global OLD_SIG: **void = nullptr;
+
 frame onSignal(sig: int) {
     if (PENDING) {
         unlink(OUT_TMP);
     }
-    _exit(128 + sig);
+    if (__TARGET_LINUX__) {
+        sysv_signal(sig, cast<*void>(nullptr));
+    }
+    kill(getpid(), sig);
+}
+
+frame cleanSig(i: int) ret int {
+    return (i == 0) ? 2 : ((i == 1) ? 15 : 1);   # SIGINT, SIGTERM, SIGHUP
+}
+
+frame catchSignals() {
+    if (!__TARGET_LINUX__) {
+        return;   # sysv_signal is glibc's; elsewhere an interrupted decode can leave OUT.fm4-XXXXXX
+    }
+    OLD_SIG = cast<**void>(xalloc(3 * 8));
+    loop (local i: int = 0; i < 3; i = i + 1) {
+        OLD_SIG[i] = signal(cleanSig(i), onSignal);
+        if (cast<long>(OLD_SIG[i]) == 1) {
+            sysv_signal(cleanSig(i), cast<*void>(1));   # was ignored: stays ignored
+        }
+    }
+}
+
+frame releaseSignals() {
+    if (__TARGET_LINUX__ && OLD_SIG != nullptr) {
+        loop (local i: int = 0; i < 3; i = i + 1) {
+            sysv_signal(cleanSig(i), OLD_SIG[i]);
+        }
+        OLD_SIG = nullptr;
+    }
+    PENDING = false;
 }
 
 frame mapOut(path: string, n: long) ret *u8 {
@@ -160,9 +197,7 @@ frame mapOut(path: string, n: long) ret *u8 {
         return nullptr;
     }
     PENDING = true;
-    signal(2, onSignal);    # SIGINT
-    signal(15, onSignal);   # SIGTERM
-    signal(1, onSignal);    # SIGHUP
+    catchSignals();
     local um: int = umask(0);
     umask(um);
     fchmod(fd, 438 & ~um);   # 0666 minus umask, what fopen gives
@@ -176,7 +211,7 @@ frame mapOut(path: string, n: long) ret *u8 {
     if (p == nullptr) {
         printf("cannot write %s (disk full?)\n", path);
         unlink(OUT_TMP);
-        PENDING = false;
+        releaseSignals();
         IO_ERR = true;
     }
     return p;
@@ -189,17 +224,19 @@ frame finishOut(path: string, p: *u8, n: long, ok: bool) ret int {
     } else if (munmap(cast<*void>(p), n) != 0) {
         good = false;
     }
-    PENDING = false;
     if (!good) {
         unlink(OUT_TMP);
+        releaseSignals();
         return 1;
     }
     if (rename(OUT_TMP, path) != 0) {
         printf("cannot write %s\n", path);
         unlink(OUT_TMP);
+        releaseSignals();
         IO_ERR = true;
         return 1;
     }
+    releaseSignals();   # only now: a signal before the rename still removes the temporary file
     return 0;
 }
 

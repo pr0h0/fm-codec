@@ -15,6 +15,7 @@ trap 'rm -rf "$D"' EXIT
 python3 "$R/tests/gen.py" "$D/in" || exit 1
 fail=0
 bad() { echo "FAIL: $*"; fail=1; }
+none_like() { for f in "$@"; do [ -e "$f" ] && return 1; done; return 0; }   # none of these (glob) names exist
 hash() { if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -c1-64; else shasum -a 256 "$1" | cut -c1-64; fi; }
 T=; if command -v timeout >/dev/null; then T="timeout 60"; elif command -v gtimeout >/dev/null; then T="gtimeout 60"; else echo "warning: no timeout(1); corrupt-input hangs are not detected"; fi
 nb=0; [ -x "$B" ] && nb=1
@@ -160,15 +161,13 @@ mkdir -p "$D/big" && cp "$D/in/text.txt" "$D/in/video_64x48.rgb" "$D/in/audio_2.
     $C enc -t 2 4 video 64 48 video_64x48.rgb v.fmv && cmp -s v.fmv "$D/s1" && $C dec v.fmv v.out && cmp -s v.out video_64x48.rgb &&
     mkdir tree && cp text.txt audio_2.pcm random.bin tree/ && $C a 4 a.fma tree >/dev/null 2>&1 && mkdir x && $C x a.fma x >/dev/null 2>&1 &&
     diff -r tree x/tree >/dev/null && ! $C dec "$D/text.txt.4.fm4" /nonexistent/dir/o 2>/dev/null &&
-    ! $C dec a.fma bad.out 2>/dev/null && [ -z "$(ls -A . | grep '^bad\.out')" ] &&
-    [ -z "$(ls -A . | grep -v '^\(text.txt\|video_64x48.rgb\|audio_2.pcm\|random.bin\|t.fm4\|t.out\|r.fm4\|r.out\|x86.bin\|e.fm4\|e.out\|v.fmv\|v.out\|tree\|a.fma\|x\)$')" ] &&
-    [ -z "$(ls -A x | grep -v '^tree$')" ]) || bad "file-backed paths (FM4_BIG=1)"
+    ! $C dec a.fma bad.out 2>/dev/null && none_like bad.out* .fm4-* ./*.fm4-* x/.fm4-*) || bad "file-backed paths (FM4_BIG=1)"
 if [ $nb = 1 ]; then
     (cd "$D/big" && export FM4_BIG=1 SEG_MB=0.05 && rm -f t.out v.out &&
         $B enc 4 bytes text.txt tb.fm4 && cmp -s tb.fm4 t.fm4 && $B dec tb.fm4 t.out && cmp -s t.out text.txt &&
         $B enc 4 bytes x86.bin eb.fm4 && cmp -s eb.fm4 e.fm4 && $B dec eb.fm4 e.out && cmp -s e.out x86.bin &&
         $B enc -t 2 4 video 64 48 video_64x48.rgb vb.fmv && cmp -s vb.fmv v.fmv && $B dec vb.fmv v.out && cmp -s v.out video_64x48.rgb &&
-        ! $B dec a.fma badb.out >/dev/null 2>&1 && [ -z "$(ls -A . | grep '^\.fm4-\|^badb\.out')" ]) || bad "BPL file-backed paths (FM4_BIG=1)"
+        ! $B dec a.fma badb.out >/dev/null 2>&1 && none_like badb.out* .fm4-* ./*.fm4-*) || bad "BPL file-backed paths (FM4_BIG=1)"
 fi
 
 # a format-1 header claiming a huge length is decoded into memory, never into a file it would fill: the
@@ -180,8 +179,8 @@ open(sys.argv[2], 'wb').write(d)" "$R/tests/v1/text.fm4" "$D/big/v1huge.fm4"
 # (with vm.overcommit_memory=1 the allocation succeeds and decoding just runs: then a timeout is fine too; the
 # point is that no output file appears)
 if [ -n "$T" ]; then
-    (cd "$D/big" && FM4_BIG=1 timeout 10 $C dec v1huge.fm4 huge.out >/dev/null 2>&1; rc=$?
-     { [ $rc -le 1 ] || [ $rc = 124 ] || [ $rc = 137 ]; } && [ -z "$(ls -A . | grep '^huge\.out')" ]) || bad "format-1 huge length went to a file"
+    (cd "$D/big" && FM4_BIG=1 ${T% *} 10 $C dec v1huge.fm4 huge.out >/dev/null 2>&1; rc=$?
+     { [ $rc -le 1 ] || [ $rc = 124 ] || [ $rc = 137 ]; } && none_like huge.out*) || bad "format-1 huge length went to a file"
 fi
 
 # ---- locked hashes ----

@@ -995,12 +995,21 @@ static uint8_t *map_in(const char *path, int64_t *n) {
 typedef struct { const char *path; char tmp[4200]; uint8_t *p; int64_t n; int mapped, v2, ioerr; } Out;
 static int spit(const char *path, uint8_t *b, int64_t n);
 #ifndef NO_FORK
-/* an interrupted decode removes its temporary output (it has the full size reserved) */
+/* An interrupted decode removes its temporary output (it has the full size reserved), then dies of the signal
+   as before (the shell sees a signal death). Signals that were ignored (nohup, background jobs) stay ignored, and
+   the earlier handlers come back once the output is published or removed. */
 static char PENDING[4200];
-static void on_signal(int sig) { if (PENDING[0]) unlink(PENDING); _exit(128 + sig); }
+static const int CLEAN_SIG[3] = {SIGINT, SIGTERM, SIGHUP};
+static void (*OLD_SIG[3])(int);
+static void on_signal(int sig) { if (PENDING[0]) unlink(PENDING); signal(sig, SIG_DFL); raise(sig); }
 static void pending(const char *t) {
-    snprintf(PENDING, sizeof PENDING, "%s", t ? t : "");
-    if (t) { signal(SIGINT, on_signal); signal(SIGTERM, on_signal); signal(SIGHUP, on_signal); }
+    if (t) {
+        snprintf(PENDING, sizeof PENDING, "%s", t);
+        for (int i = 0; i < 3; i++) if ((OLD_SIG[i] = signal(CLEAN_SIG[i], on_signal)) == SIG_IGN) signal(CLEAN_SIG[i], SIG_IGN);
+    } else if (PENDING[0]) {
+        for (int i = 0; i < 3; i++) signal(CLEAN_SIG[i], OLD_SIG[i]);
+        PENDING[0] = 0;
+    }
 }
 #endif
 static uint8_t *out_open(Out *o, int64_t n, int to_file) {
