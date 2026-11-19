@@ -4,8 +4,9 @@
 # changes and platform differences). Builds that exist are tested: c/fm4 (required), bpl/fm4, bpl/fm4.wasm
 # (with node). UPDATE=1 rewrites tests/expected.txt. FM4=path overrides the C binary (e.g. a sanitizer build).
 set -u
-# sanitizer builds (FM4=...): report errors with status 99, which the corrupt-input checks don't accept
-export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0}:exitcode=99" UBSAN_OPTIONS="${UBSAN_OPTIONS:-print_stacktrace=1}:exitcode=99" MSAN_OPTIONS="${MSAN_OPTIONS:-}:exitcode=99"
+# sanitizer builds (FM4=...): report errors with status 99, which the corrupt-input checks don't accept; an
+# impossible allocation returns NULL as plain malloc does (the code then exits with "out of memory")
+export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0}:exitcode=99:allocator_may_return_null=1" UBSAN_OPTIONS="${UBSAN_OPTIONS:-print_stacktrace=1}:exitcode=99" MSAN_OPTIONS="${MSAN_OPTIONS:-}:exitcode=99:allocator_may_return_null=1"
 R=$(cd "$(dirname "$0")/.." && pwd)
 C=${FM4:-$R/c/fm4}
 B=$R/bpl/fm4
@@ -44,6 +45,7 @@ bin.dat bytes
 empty.bin bytes
 ff.bin bytes
 text_ff.bin bytes
+x86.bin bytes
 one.bin bytes
 random.bin bytes
 img_96.rgb image 96
@@ -150,23 +152,32 @@ echo "corrupt inputs: $n runs"
 
 # ---- the file-backed paths (inputs mapped, output written in place, temporary files for big buffers) run
 # only from 64 MB; FM4_BIG=1 runs them on the small inputs: same files, and no temporary files left behind ----
-mkdir -p "$D/big" && cp "$D/in/text.txt" "$D/in/video_64x48.rgb" "$D/in/audio_2.pcm" "$D/in/random.bin" "$D/big/"
+mkdir -p "$D/big" && cp "$D/in/text.txt" "$D/in/video_64x48.rgb" "$D/in/audio_2.pcm" "$D/in/random.bin" "$D/in/x86.bin" "$D/big/"
 (cd "$D/big" && export FM4_BIG=1 SEG_MB=0.05 PART_MB=0.02 &&
     $C enc 4 bytes text.txt t.fm4 && $C dec t.fm4 t.out && cmp -s t.out text.txt && cmp -s t.fm4 "$D/text.txt.4.fm4" &&
     $C enc 0 bytes random.bin r.fm4 && $C dec r.fm4 r.out && cmp -s r.out random.bin &&
+    $C enc 4 bytes x86.bin e.fm4 && cmp -s e.fm4 "$D/x86.bin.4.fm4" && $C dec e.fm4 e.out && cmp -s e.out x86.bin &&
     $C enc -t 2 4 video 64 48 video_64x48.rgb v.fmv && cmp -s v.fmv "$D/s1" && $C dec v.fmv v.out && cmp -s v.out video_64x48.rgb &&
     mkdir tree && cp text.txt audio_2.pcm random.bin tree/ && $C a 4 a.fma tree >/dev/null 2>&1 && mkdir x && $C x a.fma x >/dev/null 2>&1 &&
     diff -r tree x/tree >/dev/null && ! $C dec "$D/text.txt.4.fm4" /nonexistent/dir/o 2>/dev/null &&
-    ! $C dec a.fma bad.out 2>/dev/null && [ ! -e bad.out ] && [ ! -e bad.out.partial ] &&
-    [ -z "$(ls -A . | grep -v '^\(text.txt\|video_64x48.rgb\|audio_2.pcm\|random.bin\|t.fm4\|t.out\|r.fm4\|r.out\|v.fmv\|v.out\|tree\|a.fma\|x\)$')" ] &&
+    ! $C dec a.fma bad.out 2>/dev/null && [ -z "$(ls -A . | grep '^bad\.out')" ] &&
+    [ -z "$(ls -A . | grep -v '^\(text.txt\|video_64x48.rgb\|audio_2.pcm\|random.bin\|t.fm4\|t.out\|r.fm4\|r.out\|x86.bin\|e.fm4\|e.out\|v.fmv\|v.out\|tree\|a.fma\|x\)$')" ] &&
     [ -z "$(ls -A x | grep -v '^tree$')" ]) || bad "file-backed paths (FM4_BIG=1)"
 if [ $nb = 1 ]; then
     (cd "$D/big" && export FM4_BIG=1 SEG_MB=0.05 && rm -f t.out v.out &&
         $B enc 4 bytes text.txt tb.fm4 && cmp -s tb.fm4 t.fm4 && $B dec tb.fm4 t.out && cmp -s t.out text.txt &&
+        $B enc 4 bytes x86.bin eb.fm4 && cmp -s eb.fm4 e.fm4 && $B dec eb.fm4 e.out && cmp -s e.out x86.bin &&
         $B enc -t 2 4 video 64 48 video_64x48.rgb vb.fmv && cmp -s vb.fmv v.fmv && $B dec vb.fmv v.out && cmp -s v.out video_64x48.rgb &&
-        ! $B dec a.fma badb.out >/dev/null 2>&1 && [ ! -e badb.out ] && [ ! -e badb.out.partial ] &&
-        [ -z "$(ls -A . | grep '^\.fm4-\|partial$')" ]) || bad "BPL file-backed paths (FM4_BIG=1)"
+        ! $B dec a.fma badb.out >/dev/null 2>&1 && [ -z "$(ls -A . | grep '^\.fm4-\|^badb\.out')" ]) || bad "BPL file-backed paths (FM4_BIG=1)"
 fi
+
+# a format-1 header claiming a huge length is decoded into memory, never into a file it would fill: the
+# output file must not be created (the allocation fails or the decode is rejected)
+python3 -c "
+import struct, sys
+d = bytearray(open(sys.argv[1], 'rb').read()); d[16:24] = struct.pack('<Q', 1 << 39)
+open(sys.argv[2], 'wb').write(d)" "$R/tests/v1/text.fm4" "$D/big/v1huge.fm4"
+(cd "$D/big" && FM4_BIG=1 $T $C dec v1huge.fm4 huge.out >/dev/null 2>&1; [ $? -le 1 ] && [ -z "$(ls -A . | grep '^huge\.out')" ]) || bad "format-1 huge length went to a file"
 
 # ---- locked hashes ----
 if [ "${UPDATE:-0}" = 1 ]; then cp "$D/hashes" "$R/tests/expected.txt"; echo "tests/expected.txt updated"

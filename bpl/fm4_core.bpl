@@ -2523,5 +2523,6 @@ export fm4EstimateDecode;
 export xalloc;
 export fm4StreamOk;
 export fm4UseBuffer;
+export e8e9Detect;
 export fm4AllowAnyParams;
 export fm4SetArena;

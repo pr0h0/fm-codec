@@ -2,7 +2,7 @@
 # fm4 enc LEVEL audio CHANNELS IN OUT | fm4 enc LEVEL video WIDTH HEIGHT IN OUT | fm4 dec IN OUT
 # fm4 enc|dec -t N ...: processes for segmented video (same FMV format and cut as c/fm4.c).
 import printf, malloc, strcmp, atoi, snprintf from "std/c.bpl";
-import fm4Encode, fm4Decode, fm4Result, fm4Estimate, fm4EstimateDecode, fm4SetArena, xalloc, fm4StreamOk, fm4AllowAnyParams, fm4UseBuffer from "./fm4_core.bpl";
+import fm4Encode, fm4Decode, fm4Result, fm4Estimate, fm4EstimateDecode, fm4SetArena, xalloc, fm4StreamOk, fm4AllowAnyParams, fm4UseBuffer, e8e9Detect from "./fm4_core.bpl";
 
 extern fopen(path: string, mode: string) ret *void;
 extern fread(buffer: *void, size: long, count: long, stream: *void) ret long;
@@ -33,6 +33,9 @@ extern rename(src: string, dst: string) ret int;
 extern munmap(p: *void, n: long) ret int;
 extern strrchr(s: string, c: int) ret string;
 extern free(p: *void);
+extern posix_fallocate(fd: int, off: long, n: long) ret int;
+extern fchmod(fd: int, mode: int) ret int;
+extern umask(mode: int) ret int;
 
 global HDR_MAX: long = 36;   # 28-byte FM4 header + 8 (stream may exceed L by the header plus a little)
 global USAGE: string = "usage: fm4 enc LEVEL(0-5) bytes IN OUT | fm4 enc LEVEL image WIDTH IN OUT | fm4 enc LEVEL audio CHANNELS IN OUT | fm4 enc LEVEL video WIDTH HEIGHT IN OUT | fm4 dec IN OUT | fm4 enc|dec -t N ...\n";
@@ -65,8 +68,13 @@ frame mapAnonShared() ret int {
     return __TARGET_MACOS__ ? 4097 : 33;   # MAP_SHARED | MAP_ANONYMOUS
 }
 
-frame openCreate() ret int {
-    return __TARGET_MACOS__ ? 1538 : 578;   # O_RDWR | O_CREAT | O_TRUNC
+# Gives the file n bytes of disk blocks now: a mapped page that cannot be written back later (disk full) would
+# kill the process with SIGBUS, so a full disk must fail here (as reserve() in c/fm4.c). macOS: ftruncate only.
+frame reserve(fd: int, n: long) ret bool {
+    if (__TARGET_LINUX__) {
+        return posix_fallocate(fd, 0, n) == 0;
+    }
+    return ftruncate(fd, n) == 0;
 }
 
 frame mapped(p: *void) ret *u8 {
@@ -98,7 +106,7 @@ frame mapTemp(n: long) ret *u8 {
     }
     unlink(t);
     local p: *u8 = nullptr;
-    if (ftruncate(fd, n) == 0) {
+    if (reserve(fd, n)) {
         p = mapped(mmap(nullptr, n, 3, mapShared(), fd, 0));
     }
     close(fd);
@@ -127,32 +135,40 @@ frame mapIn(path: string, outLen: *long) ret *u8 {
     return slurp(path, outLen);
 }
 
-# output of n bytes, written in place: a mapping of path.partial; finishOut renames it, or removes it on failure
+# Output written in place: mapOut gives a mapping of a new temporary file next to path (mkstemp: no existing file
+# is touched) with its space reserved; finishOut renames it to path, or removes it on failure. Only for format-2
+# lengths, which are bounded by the input (see Out in c/fm4.c); format 1 decodes into memory.
+global OUT_TMP: string = "";
+global IO_ERR: bool = false;   # an I/O error was already reported (not a corrupt file)
+
 frame mapOut(path: string, n: long) ret *u8 {
-    local t: string = cast<string>(xalloc(4200));
-    snprintf(t, 4200, "%s.partial", path);
-    local fd: int = open(t, openCreate(), 438);   # 0666
+    OUT_TMP = cast<string>(xalloc(4200));
+    snprintf(OUT_TMP, 4200, "%s.XXXXXX", path);
+    local fd: int = mkstemp(OUT_TMP);
     if (fd < 0) {
-        printf("cannot write %s\n", t);
+        printf("cannot write %s\n", path);
+        IO_ERR = true;
         return nullptr;
     }
+    local um: int = umask(0);
+    umask(um);
+    fchmod(fd, 438 & ~um);   # 0666 minus umask, what fopen gives
     local p: *u8 = nullptr;
     if (n == 0) {
         p = xalloc(1);
-    } else if (ftruncate(fd, n) == 0) {
+    } else if (reserve(fd, n)) {
         p = mapped(mmap(nullptr, n, 3, mapShared(), fd, 0));
     }
     close(fd);
     if (p == nullptr) {
-        printf("cannot write %s\n", t);
-        unlink(t);
+        printf("cannot write %s (disk full?)\n", path);
+        unlink(OUT_TMP);
+        IO_ERR = true;
     }
     return p;
 }
 
 frame finishOut(path: string, p: *u8, n: long, ok: bool) ret int {
-    local t: string = cast<string>(xalloc(4200));
-    snprintf(t, 4200, "%s.partial", path);
     local good: bool = ok;
     if (n == 0) {
         free(cast<*void>(p));
@@ -160,12 +176,13 @@ frame finishOut(path: string, p: *u8, n: long, ok: bool) ret int {
         good = false;
     }
     if (!good) {
-        unlink(t);
+        unlink(OUT_TMP);
         return 1;
     }
-    if (rename(t, path) != 0) {
+    if (rename(OUT_TMP, path) != 0) {
         printf("cannot write %s\n", path);
-        unlink(t);
+        unlink(OUT_TMP);
+        IO_ERR = true;
         return 1;
     }
     return 0;
@@ -221,6 +238,10 @@ frame shared(n: long) ret *u8 {
             return t;
         }
     }
+    return sharedAnon(n);
+}
+
+frame sharedAnon(n: long) ret *u8 {
     return mapped(mmap(nullptr, n, 3, mapAnonShared(), -1, 0));
 }
 
@@ -342,6 +363,7 @@ frame decVideoSegments(f: *u8, n: long, threads: long, out: string) ret int {
     local outs: **u8 = cast<**u8>(xalloc(ns * 8 + 8));
     local all: long = 0;
     local pos: long = 8;
+    local v2: bool = true;
     loop (local k: long = 0; k < ns; k = k + 1) {
         if (n - pos < 36) {
             return 1;
@@ -352,6 +374,7 @@ frame decVideoSegments(f: *u8, n: long, threads: long, out: string) ret int {
             return 1;
         }
         ins[k] = &f[pos + 8];
+        v2 = v2 && f[pos + 11] == cast<u8>(2);
         Ms[k] = m;
         Ls[k] = sl;
         all = all + sl;
@@ -360,7 +383,8 @@ frame decVideoSegments(f: *u8, n: long, threads: long, out: string) ret int {
     if (pos != n) {
         return 1;
     }
-    local d: *u8 = mapOut(out, all);
+    # format 2: straight into the output file; format 1 (lengths with no bound): memory, written at the end
+    local d: *u8 = v2 ? mapOut(out, all) : sharedAnon((all > 0) ? all : 1);
     if (d == nullptr) {
         return 1;
     }
@@ -369,7 +393,18 @@ frame decVideoSegments(f: *u8, n: long, threads: long, out: string) ret int {
         outs[k2] = &d[o];
         o = o + Ls[k2];
     }
-    return finishOut(out, d, all, runJobs(ns, threads, true, 0, 0, 0, ins, Ms, Ls, outs) == 0);
+    local ok: bool = runJobs(ns, threads, true, 0, 0, 0, ins, Ms, Ls, outs) == 0;
+    if (!v2) {
+        if (!ok) {
+            return 1;
+        }
+        if (spit(out, d, all) != 0) {
+            IO_ERR = true;
+            return 1;
+        }
+        return 0;
+    }
+    return finishOut(out, d, all, ok);
 }
 
 frame main(argc: int, argv: *string) ret int {
@@ -443,6 +478,15 @@ frame main(argc: int, argv: *string) ret int {
             }
         }
         hugeArena(L, mode);
+        if (mode == 1 && L >= BIG && level >= 1 && e8e9Detect(data, L)) {
+            # the E8/E9 pass rewrites nearly every page: on a mapped input those would become anonymous memory,
+            # so the encoder gets a file-backed copy (as in c/fm4.c)
+            local cp: *u8 = mapTemp(L);
+            if (cp != nullptr) {
+                memcpy(cast<*void>(cp), cast<*void>(data), L);
+                data = cp;
+            }
+        }
         if (L + 36 >= BIG) {
             local eb: *u8 = mapTemp(L + 36);   # the result (at most L + 36 bytes) in a temporary file
             if (eb != nullptr) {
@@ -461,7 +505,9 @@ frame main(argc: int, argv: *string) ret int {
         scratchDirFor(argv[3]);
         if (n >= 8 && f[0] == cast<u8>(70) && f[1] == cast<u8>(77) && f[2] == cast<u8>(86) && f[3] == cast<u8>(1)) {
             if (decVideoSegments(f, n, threads, argv[3]) != 0) {
-                printf("not an FM4 file, or corrupt\n");
+                if (!IO_ERR) {
+                    printf("not an FM4 file, or corrupt\n");
+                }
                 return 1;
             }
             return 0;
@@ -474,7 +520,7 @@ frame main(argc: int, argv: *string) ret int {
         # a header that passes the checks gets its output written in place, into the output file
         local out: *u8 = nullptr;
         local hL: long = (n >= 28) ? get64(&f[16]) : -1;
-        if (n >= 28 && f[0] == cast<u8>(70) && f[1] == cast<u8>(77) && f[2] == cast<u8>(52) && fm4StreamOk(f, n, hL)) {
+        if (n >= 36 && f[0] == cast<u8>(70) && f[1] == cast<u8>(77) && f[2] == cast<u8>(52) && f[3] == cast<u8>(2) && fm4StreamOk(f, n, hL)) {
             out = mapOut(argv[3], hL);
             if (out == nullptr) {
                 return 1;
@@ -484,7 +530,9 @@ frame main(argc: int, argv: *string) ret int {
         local L: long = fm4Decode(f, n);
         if (out != nullptr) {
             if (finishOut(argv[3], out, hL, L == hL) != 0) {
-                printf("not an FM4 file\n");
+                if (!IO_ERR) {
+                    printf("not an FM4 file\n");
+                }
                 return 1;
             }
             return 0;

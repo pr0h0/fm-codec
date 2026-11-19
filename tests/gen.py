@@ -55,6 +55,10 @@ put("video_64x48.rgb", vid)
 
 put("ff.bin", b"\xff" * 100000)  # codes as zero bytes, which are stripped: a header-only file
 put("text_ff.bin", " ".join(text[:500]).encode() + b"\xff" * 200000)
+x86 = bytearray()  # code-like: CALL/JMP rel32 to a few targets, so the E8/E9 transform is used
+for i in range(4000):
+    x86 += bytes((0x55, 0x48, 0x89, 0xE5)) + bytes((0xE8 if i % 3 else 0xE9,)) + struct.pack("<i", 4096 * (i % 7) - 5 * i - len(x86) - 5) + bytes((0x5D, 0xC3))
+put("x86.bin", x86)
 put("empty.bin", b"")
 put("one.bin", b"x")
 put("random.bin", bytes(rnd() & 255 for _ in range(5000)))  # incompressible: stored

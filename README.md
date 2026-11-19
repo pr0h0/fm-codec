@@ -107,9 +107,11 @@ c/fm4 x out.fma destdir                       # extract (also parallel)
 ```
 
 **Data larger than RAM:** the native builds (`c/fm4`, `bpl/fm4`) don't keep the data in memory. Inputs are
-memory-mapped, decoded output is written straight into a mapping of `OUT.partial` (renamed when complete, removed
-on failure), and buffers of 64 MB and more (encoder output, archive data, segment results) live in unlinked
-temporary files next to the output. The kernel can page all of it out, so only the model's tables (up to about
+memory-mapped, decoded output is written straight into a mapping of a new temporary file next to `OUT` (renamed
+to `OUT` when complete, removed on failure), and buffers of 64 MB and more (encoder output, archive data, segment
+results, the E8/E9-transformed copy of a large executable) live in unlinked temporary files next to the output.
+Their disk space is reserved up front, so a full disk is an error, not a crash; it takes free space about the
+size of the data. Format-1 files, whose header length has no bound, still decode into memory. The kernel can page all of it out, so only the model's tables (up to about
 1.2 GB per process) need memory: under a 1 GB memory limit a 3 GB file encodes and decodes (the previous build
 was killed), and a 1.2 GB text file encodes at level 1 under 512 MB. Windows still reads files into memory.
 
