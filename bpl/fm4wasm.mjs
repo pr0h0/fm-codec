@@ -15,9 +15,10 @@ export async function loadFm4Wasm(source) {
   if (x.__wasm_call_ctors) x.__wasm_call_ctors();
 
   // bump allocator never grows memory: grow it here before any call that may allocate
-  const ensure = (L, mode) => {
+  // (decoding: bb is the stream's table bits, which set its table sizes)
+  const ensure = (L, mode, bb = -1) => {
     const top = x.malloc(0n) >>> 0;                       // current heap cursor
-    const need = top + Number(x.fm4Estimate(BigInt(L), mode));
+    const need = top + Number(bb < 0 ? x.fm4Estimate(BigInt(L), mode) : x.fm4EstimateDecode(BigInt(L), mode, bb));
     const have = mem.buffer.byteLength;
     if (need > have) mem.grow(Math.ceil((need - have) / 65536));
   };
@@ -49,7 +50,7 @@ export async function loadFm4Wasm(source) {
     decode(buf) {
       const L = buf.length >= 28 ? new DataView(buf.buffer, buf.byteOffset).getUint32(16, true) : 0;
       const m = buf[4];
-      ensure(Math.max(L, buf.length), m);
+      ensure(Math.max(L, buf.length), m, buf.length > 5 ? buf[5] : 12);
       const p = x.fm4InputBuffer(BigInt(buf.length)) >>> 0;
       new Uint8Array(mem.buffer, p, buf.length).set(buf);
       const n = Number(x.fm4Decode(p, BigInt(buf.length)));

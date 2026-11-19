@@ -798,6 +798,10 @@ static int params_ok(int mode, uint32_t feat, uint32_t feat2, int64_t width, int
 static uint8_t *fm4_encode(int level, int mode, int64_t width, uint8_t *data, int64_t L, int64_t *outLen) {
     uint32_t feat = LEVEL_FEAT(mode, level), feat2 = LEVEL_FEAT2(mode, level);
     int bb = level == 5 && mode == 1 ? 19 : 18, limit = 255;
+    /* short inputs get small tables: 2^(bb-2) >= L (16 buckets each; larger tables would stay mostly empty).
+       Costs at most ~0.05% in size and cuts memory for a 2 KB input from 320 to 50 MB. */
+    int small = BB_MIN; while (small < bb && ((int64_t)1 << (small - 2)) < L) small++;
+    bb = small;
     if (mode == 2 && (width >> 16) && (width & 0xFFFF) && level >= 2) feat2 |= 256;   /* video (a plain image 65536*k wide is not: run() would divide by width 0) */
     if (getenv("FEAT")) feat = (uint32_t)atoi(getenv("FEAT"));
     if (getenv("FEAT2")) feat2 = (uint32_t)atoi(getenv("FEAT2"));

@@ -2262,7 +2262,7 @@ frame fm4Encode(level: int, mode: int, width: long, data: *u8, L: long) ret long
     if (level >= 1 && level <= 5) {
         local feat: uint = levelFeat(level, mode);
         local feat2: uint = levelFeat2(level, mode);
-        local bb: int = (level == 5 && mode == 1) ? 19 : 18;
+        local bb: int = bbFor(L, (level == 5 && mode == 1) ? 19 : 18);
         # video; a plain image 65536*k wide is not (its low 16 bits are no width)
         if (mode == 2 && (width >> 16) != 0 && (width & 65535) != 0 && level >= 2) {
             feat2 = feat2 | cast<uint>(256);
@@ -2449,10 +2449,28 @@ frame fm4InputBuffer(n: long) ret *u8 {
     return IB;
 }
 
-# Upper bound of bytes the next encode/decode of L bytes (any level) may newly allocate.
+# Table bits for L bytes: the level's default, or less for short inputs (2^(bb-2) >= L), as in c/fm4.c.
+frame bbFor(L: long, dflt: int) ret int {
+    local bb: int = 12;
+    loop (bb < dflt && (cast<long>(1) << cast<long>(bb - 2)) < L) {
+        bb = bb + 1;
+    }
+    return bb;
+}
+
+# Upper bound of bytes the next encode of L bytes (any level) may newly allocate.
 @[c_export]
 frame fm4Estimate(L: long, mode: int) ret long {
-    local bb: int = (mode == 2) ? 18 : 19;
+    return estimateWith(L, mode, bbFor(L, (mode == 2) ? 18 : 19));
+}
+
+# The same for decoding a stream whose header says bb (any value a decoder accepts).
+@[c_export]
+frame fm4EstimateDecode(L: long, mode: int, bb: int) ret long {
+    return estimateWith(L, mode, (bb < 12) ? 12 : ((bb > 22) ? 22 : bb));
+}
+
+frame estimateWith(L: long, mode: int, bb: int) ret long {
     local total: long = 1048576 + 4096 * 4 + 256 * 4 + 33 * 4;
     # worst case: video bit set, 8 audio channels
     local ar: long = arenaSize(mode, bb, levelFeat(5, mode), levelFeat2(5, mode) | cast<uint>((mode == 2) ? 256 : 0), L, 8);
@@ -2477,6 +2495,7 @@ export fm4Decode;
 export fm4Result;
 export fm4InputBuffer;
 export fm4Estimate;
+export fm4EstimateDecode;
 export xalloc;
 export fm4StreamOk;
 export fm4AllowAnyParams;
