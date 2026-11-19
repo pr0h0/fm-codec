@@ -36,8 +36,7 @@ extern free(p: *void);
 extern posix_fallocate(fd: int, off: long, n: long) ret int;
 extern fchmod(fd: int, mode: int) ret int;
 extern umask(mode: int) ret int;
-extern signal(sig: int, handler: Func<void>(int)) ret *void;
-extern sysv_signal(sig: int, handler: *void) ret *void;   # sets SIG_DFL (0) / SIG_IGN (1) / a saved handler
+extern signal(sig: int, handler: Func<void>(int)) ret Func<void>(int);
 extern kill(pid: int, sig: int) ret int;
 extern getpid() ret int;
 
@@ -150,13 +149,15 @@ global IO_ERR: bool = false;   # an I/O error was already reported (not a corrup
 # Ignored signals (nohup, background jobs) stay ignored; the earlier handlers come back afterwards (as c/fm4.c).
 global OLD_SIG: **void = nullptr;
 
+frame sigAction(v: long) ret Func<void>(int) {
+    return cast<Func<void>(int)>(cast<*void>(v));   # SIG_DFL = 0, SIG_IGN = 1
+}
+
 frame onSignal(sig: int) {
     if (PENDING) {
         unlink(OUT_TMP);
     }
-    if (__TARGET_LINUX__) {
-        sysv_signal(sig, cast<*void>(nullptr));
-    }
+    signal(sig, sigAction(0));
     kill(getpid(), sig);
 }
 
@@ -165,22 +166,20 @@ frame cleanSig(i: int) ret int {
 }
 
 frame catchSignals() {
-    if (!__TARGET_LINUX__) {
-        return;   # sysv_signal is glibc's; elsewhere an interrupted decode can leave OUT.fm4-XXXXXX
-    }
     OLD_SIG = cast<**void>(xalloc(3 * 8));
     loop (local i: int = 0; i < 3; i = i + 1) {
-        OLD_SIG[i] = signal(cleanSig(i), onSignal);
+        local old: Func<void>(int) = signal(cleanSig(i), onSignal);
+        OLD_SIG[i] = cast<*void>(old);
         if (cast<long>(OLD_SIG[i]) == 1) {
-            sysv_signal(cleanSig(i), cast<*void>(1));   # was ignored: stays ignored
+            signal(cleanSig(i), old);   # was ignored: stays ignored
         }
     }
 }
 
 frame releaseSignals() {
-    if (__TARGET_LINUX__ && OLD_SIG != nullptr) {
+    if (OLD_SIG != nullptr) {
         loop (local i: int = 0; i < 3; i = i + 1) {
-            sysv_signal(cleanSig(i), OLD_SIG[i]);
+            signal(cleanSig(i), cast<Func<void>(int)>(OLD_SIG[i]));
         }
         OLD_SIG = nullptr;
     }
