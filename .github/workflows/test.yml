@@ -1,0 +1,12 @@
+name: test
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make c/fm4 CFLAGS="-O2 -Wall"
+      - run: make test

@@ -2261,16 +2261,24 @@ frame fm4Decode(f: *u8, n: long) ret long {
     local feat2: uint = get32(ptrAdd(f, 24));
     local width: long = cast<long>(get32(ptrAdd(f, 12)));
     local L: long = cast<long>(get32(ptrAdd(f, 16))) | (cast<long>(get32(ptrAdd(f, 20))) << 32);
+    # corrupt header checks, as in c/fm4.c: images have a width, audio 1-8 channels, and a coded stream holds
+    # at most ~2840 bytes per payload byte (every bit costs at least log2(4096/4095) bits)
+    if (mode > 3 || (mode == 2 && (width & 65535) == 0) || (mode == 3 && (width < 1 || width > 8))) {
+        return -1;
+    }
+    if (L < 0 || (mode == 0 && L > n - HDR) || (mode != 0 && L / 4096 > n - HDR + 8)) {
+        return -1;
+    }
     if (L + 1 > DB_CAP) {
         if (DB != nullptr) {
             free(cast<*void>(DB));
         }
         DB = cast<*u8>(malloc(L + 1));
         DB_CAP = L + 1;
-    }
-    # audio files have 1-8 channels; anything else is not a file an encoder wrote
-    if (mode == 3 && (width < 1 || width > 8)) {
-        return -1;
+        if (DB == nullptr) {
+            DB_CAP = 0;
+            return -1;
+        }
     }
     if (mode == 0) {
         memcpy(cast<*void>(DB), cast<*void>(ptrAdd(f, HDR)), L);

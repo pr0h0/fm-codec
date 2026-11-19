@@ -786,9 +786,12 @@ static uint8_t *fm4_decode(uint8_t *f, int64_t n, int64_t *outLen) {
     int mode = f[4], bb = f[5], limit = f[6]; uint32_t feat = get32(f + 8), feat2 = get32(f + 24);
     int64_t width = get32(f + 12), L = (int64_t)get32(f + 16) | (int64_t)get32(f + 20) << 32;
     if (mode > 3 || (mode == 2 && !(width & 0xFFFF)) || (mode == 3 && (width < 1 || width > 8))) return NULL;   /* corrupt header */
+    /* every coded bit has p in [1, 4095]/4096, so it costs at least log2(4096/4095) bits: a stream holds at most
+       ~2840 bytes per payload byte (50 MB of zeros: 2838). A larger L is a corrupt header, not a big allocation. */
+    if (L < 0 || (mode == 0 ? L > n - HDR : L / 4096 > n - HDR + 8)) return NULL;
     uint8_t *data = malloc(L ? L : 1);
     if (!data) return NULL;
-    if (mode == 0) { if (L > n - HDR) { free(data); return NULL; } memcpy(data, f + HDR, L); }
+    if (mode == 0) memcpy(data, f + HDR, L);
     else {
         LR = f[7];
         Coder c = {0, 0xFFFFFFFFu, 0, f + HDR, n - HDR, 0, 0, 1};
@@ -958,7 +961,7 @@ static int archive(int level, int media, int threads, const char *out, char **pa
     /* the solid data is cut into n / PART_MB equal parts (default 8 MB, so each is at least that): costs a little
        size, lets encoding and decoding run in parallel. The cut depends only on the data, never on the thread
        count, so the archive is the same on every machine. */
-    int64_t part = (getenv("PART_MB") ? atoll(getenv("PART_MB")) : 8) << 20;
+    int64_t part = (int64_t)((getenv("PART_MB") ? atof(getenv("PART_MB")) : 8) * 1048576);
     int nsolid = part > 0 && n / part > 1 ? (int)(n / part) : 1, nj = 0;
     Job *jobs = calloc(nsolid + nown, sizeof(Job));
     for (int k = 0; k < nsolid; k++) { int64_t lo = n * k / nsolid, hi = n * (k + 1) / nsolid; jobs[nj++] = (Job){1, level, 0, hi - lo, 0, s + lo, NULL, 0}; }
@@ -1028,7 +1031,7 @@ bad:
    Inputs of at least 2 x SEG_MB (default 64 MB) are cut into L / SEG_MB equal runs of frames, so the cut
    depends only on the data; smaller inputs stay one plain FM4 stream. Segments are coded in parallel. */
 static int64_t video_segments(int64_t L, int64_t fbytes) {
-    int64_t seg = (getenv("SEG_MB") ? atoll(getenv("SEG_MB")) : 64) << 20, nf = fbytes ? L / fbytes : 0;
+    int64_t seg = (int64_t)((getenv("SEG_MB") ? atof(getenv("SEG_MB")) : 64) * 1048576), nf = fbytes ? L / fbytes : 0;
     int64_t ns = seg > 0 ? L / seg : 1;
     return ns > nf ? (nf > 0 ? nf : 1) : (ns < 1 ? 1 : ns);
 }

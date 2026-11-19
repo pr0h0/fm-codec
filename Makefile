@@ -45,4 +45,9 @@ bpl/fm4.wasm: bpl/fm4_core.bpl bpl/fm4_wasm.bpl
 # fm4.wasm uses wasm SIMD (about 1.4x faster) and bulk memory: needs Chrome 91+, Firefox 89+, Safari 16.4+ or Node 16.4+,
 # and a BPL compiler where --clang-flag -msimd128 reaches the per-function target features (80d04313 or later).
 
-.PHONY: bpl3 wasm3 bpl4 wasm4 all c bpl wasm testdata clean
+# round trips, identical output across builds, archives, corrupt input, locked hashes (tests/run.sh);
+# also tests bpl/fm4 and bpl/fm4.wasm when they are built
+test: c/fm4
+	tests/run.sh
+
+.PHONY: bpl3 wasm3 bpl4 wasm4 all c bpl wasm testdata clean test

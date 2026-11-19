@@ -14,6 +14,7 @@ extern posix_memalign(out: **void, align: long, size: long) ret int;
 extern madvise(p: *void, n: long, advice: int) ret int;
 extern atoll(s: string) ret long;
 extern getenv(name: string) ret string;
+extern atof(s: string) ret double;
 extern sysconf(name: int) ret long;
 extern fork() ret int;
 extern wait(status: *int) ret int;
@@ -91,11 +92,11 @@ frame shared(n: long) ret *u8 {
 # Segmented video: "FMV\x01" | u32 nseg | nseg x (u64 length | FM4 stream), each stream a run of whole
 # frames. Inputs of at least 2 x SEG_MB (default 64 MB) are cut into L / SEG_MB runs; same rule as c/fm4.c.
 frame videoSegments(L: long, fbytes: long) ret long {
-    local seg: long = 64;
+    local mb: double = 64.0;
     if (getenv("SEG_MB") != nullptr) {
-        seg = atoll(getenv("SEG_MB"));
+        mb = atof(getenv("SEG_MB"));
     }
-    seg = seg << 20;
+    local seg: long = cast<long>(mb * 1048576.0);
     local nf: long = L / fbytes;
     local ns: long = 1;
     if (seg > 0) {

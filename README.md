@@ -91,6 +91,7 @@ output against `c/fm4` in headless Chromium. `loadFm4Wasm()` is the synchronous 
 
 ```bash
 make c bpl4 wasm4 BPL=~/Projects/bpl3/bpl     # BPL needs bpl3 staging 80d04313 or later
+make test                                     # tests/run.sh: all modes/levels, builds agree, archives, corrupt input
 c/fm4 enc 4 bytes in.txt out.fm4              # levels 0..5
 c/fm4 enc 4 image 2048 in.rgb out.fm4         # raw RGB24, width
 c/fm4 enc 4 audio 2 in.pcm out.fm4            # raw 16-bit little-endian PCM, channels
