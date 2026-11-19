@@ -53,13 +53,14 @@
    each with results in shared memory; Windows (MinGW-w64) has no fork and codes them one after another in
    the process (same output). */
 #ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
 #include <direct.h>
 #include <io.h>
 #define NO_FORK 1
 #define mkdir(p, m) _mkdir(p)
 #define lstat stat
-__declspec(dllimport) unsigned long __stdcall GetFileAttributesA(const char *path);   /* <windows.h> */
-#define REPARSE_POINT 0x400ul   /* FILE_ATTRIBUTE_REPARSE_POINT: symlink or junction */
 #define fseeko _fseeki64
 #define ftello _ftelli64
 #else
@@ -397,8 +398,8 @@ static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, uint32_t f
                 if (fm2nd) {
                     if (mlen2 > 0) { if (data[mptr2] == data[i - 1]) { mlen2++; mptr2++; } else mlen2 = 0; }
                     if (i >= 12) {
-                        uint32_t far = (uint32_t)data[i - 9] | (uint32_t)data[i - 10] << 8 | (uint32_t)data[i - 11] << 16 | (uint32_t)data[i - 12] << 24;
-                        uint32_t hh = H(98, c4, c8, far) >> (32 - MBITS);
+                        uint32_t far4 = (uint32_t)data[i - 9] | (uint32_t)data[i - 10] << 8 | (uint32_t)data[i - 11] << 16 | (uint32_t)data[i - 12] << 24;
+                        uint32_t hh = H(98, c4, c8, far4) >> (32 - MBITS);
                         if (mlen2 == 0 && MT2[hh] > 0 && (int64_t)MT2[hh] != mptr) {
                             int64_t cand = MT2[hh], len = 0;
                             while (len < 400 && cand - 1 - len >= 0 && data[cand - 1 - len] == data[i - 1 - len]) len++;
@@ -819,8 +820,8 @@ static uint8_t *fm4_encode(int level, int mode, int64_t width, uint8_t *data, in
     int bb = level == 5 && mode == 1 ? 19 : 18, limit = 255;
     /* short inputs get small tables: 2^(bb-2) >= L (16 buckets each; larger tables would stay mostly empty).
        Costs at most ~0.05% in size and cuts memory for a 2 KB input from 320 to 50 MB. */
-    int small = BB_MIN; while (small < bb && ((int64_t)1 << (small - 2)) < L) small++;
-    bb = small;
+    int bbs = BB_MIN; while (bbs < bb && ((int64_t)1 << (bbs - 2)) < L) bbs++;
+    bb = bbs;
     if (mode == 2 && (width >> 16) && (width & 0xFFFF) && level >= 2) feat2 |= 256;   /* video (a plain image 65536*k wide is not: run() would divide by width 0) */
     if (getenv("FEAT")) feat = (uint32_t)atoi(getenv("FEAT"));
     if (getenv("FEAT2")) feat2 = (uint32_t)atoi(getenv("FEAT2"));
@@ -935,9 +936,15 @@ static int64_t log2_q16(uint64_t x) {
 }
 static void add_path(const char *path) {
 #ifdef _WIN32
-    /* stat follows symlinks and junctions; skip them as lstat does on POSIX (a junction to a parent would recurse) */
-    unsigned long at = GetFileAttributesA(path);
-    if (at != 0xFFFFFFFFul && (at & REPARSE_POINT)) { fprintf(stderr, "%s: not a regular file, skipped\n", path); return; }
+    /* stat follows symlinks and junctions; skip them as lstat does on POSIX (a junction to a parent would recurse).
+       Only those two reparse tags: OneDrive placeholders, deduplicated files etc. are ordinary files. */
+    WIN32_FIND_DATAA fd; HANDLE fh = FindFirstFileA(path, &fd);
+    if (fh != INVALID_HANDLE_VALUE) {
+        FindClose(fh);
+        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && (fd.dwReserved0 == IO_REPARSE_TAG_SYMLINK || fd.dwReserved0 == IO_REPARSE_TAG_MOUNT_POINT)) {
+            fprintf(stderr, "%s: not a regular file, skipped\n", path); return;
+        }
+    }
 #endif
     struct stat st;
     if (lstat(path, &st)) { perror(path); exit(1); }

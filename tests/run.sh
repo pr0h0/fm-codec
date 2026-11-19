@@ -80,15 +80,18 @@ for h in "$R"/tests/hostile/*.fm4; do
     done
 done
 
-# an archive whose stored name is t/..\escape.txt: an ordinary file name on POSIX, but on Windows '\' is a
-# separator, so extraction there must refuse it rather than write escape.txt outside the target directory
-mkdir -p "$D/bx/in"
-case $(uname -s) in
-MINGW*|MSYS*|CYGWIN*)
-    $C x "$R/tests/hostile/backslash_path.fma" "$D/bx/in" >/dev/null 2>&1; rc=$?
-    [ $rc = 1 ] && [ ! -e "$D/bx/escape.txt" ] || bad "Windows: an archive name with '\\' was not refused (exit $rc)";;
-*)  $C x "$R/tests/hostile/backslash_path.fma" "$D/bx/in" >/dev/null 2>&1 && [ -f "$D/bx/in/t/..\escape.txt" ] || bad "extract a name with a backslash";;
-esac
+# archives whose stored names are ordinary file names on POSIX but not on Windows, where they must be refused:
+# t/..\..\escape.txt ('\' is a separator there: it would land next to the target directory) and t/a:stream
+# (':' is a drive or an alternate data stream)
+for t in "backslash_path ..\\..\\escape.txt" "colon_path a:stream"; do
+    set -- $t; rm -rf "$D/bx"; mkdir -p "$D/bx/in"
+    case $(uname -s) in
+    MINGW*|MSYS*|CYGWIN*)
+        $C x "$R/tests/hostile/$1.fma" "$D/bx/in" >/dev/null 2>&1; rc=$?
+        [ $rc = 1 ] && [ ! -e "$D/bx/escape.txt" ] && [ -z "$(ls -A "$D/bx/in")" ] || bad "Windows: $1.fma was not refused (exit $rc)";;
+    *)  $C x "$R/tests/hostile/$1.fma" "$D/bx/in" >/dev/null 2>&1 && [ -f "$D/bx/in/t/$2" ] || bad "extract $1.fma (an ordinary name on POSIX)";;
+    esac
+done
 
 # ---- segmented video: same file for any thread count and build ----
 v=$D/in/video_64x48.rgb
