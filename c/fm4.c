@@ -937,11 +937,12 @@ static int64_t log2_q16(uint64_t x) {
 static void add_path(const char *path) {
 #ifdef _WIN32
     /* stat follows symlinks and junctions; skip them as lstat does on POSIX (a junction to a parent would recurse).
-       Only those two reparse tags: OneDrive placeholders, deduplicated files etc. are ordinary files. */
+       Only link-like reparse tags (the name-surrogate bit: symlinks, junctions, WSL symlinks); OneDrive
+       placeholders, deduplicated files etc. are ordinary files. */
     WIN32_FIND_DATAA fd; HANDLE fh = FindFirstFileA(path, &fd);
     if (fh != INVALID_HANDLE_VALUE) {
         FindClose(fh);
-        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && (fd.dwReserved0 == IO_REPARSE_TAG_SYMLINK || fd.dwReserved0 == IO_REPARSE_TAG_MOUNT_POINT)) {
+        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && IsReparseTagNameSurrogate(fd.dwReserved0)) {
             fprintf(stderr, "%s: not a regular file, skipped\n", path); return;
         }
     }
