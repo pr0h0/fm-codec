@@ -165,7 +165,7 @@ comparison: `tar | xz -9e` 404,800, `zstd -19` 443,387, `zip -9` 935,388.
 
 - **Slow.** About 0.3-2.7 MB/s per core depending on level (table above), against tens to hundreds of
   MB/s for zstd. Decoding is as slow as encoding: the decoder has to run the same model.
-- **Memory.** 25-630 MB per process depending on level, and each parallel segment or archive part is
+- **Memory.** 24-630 MB per process depending on level, and each parallel segment or archive part is
   its own process. Archives use about 350-420 MB per process.
 - **Pre-release format.** Format 1 may still change in ways that old builds can't read.
 - **Raw media only.** The image, audio and video modes take raw RGB24 or 16-bit PCM, and you have to give

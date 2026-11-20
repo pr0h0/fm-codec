@@ -56,7 +56,7 @@ for video. `L` is the original length.
 **Segments** (`FMS\x01 | u32 count | count x (u64 length | FM4 stream)`): inputs of 128 MB and more,
 in any mode, are cut into size / 64 MB runs of whole units: bytes, image rows, video frames, or audio
 samples of every channel. The runs are coded as independent streams, in parallel. The cut depends only on
-the data, so the file is the same for any thread count. Each segment costs its model's memory (25-630 MB
+the data, so the file is the same for any thread count. Each segment costs its model's memory (24-630 MB
 by level). Splitting costs a little compression, because each segment starts with an empty model.
 256 MB of mixed data at level 1 in 4 segments came out 1.9% larger, and took 62 s instead of 158 s on
 4 cores. `SEG_MB` sets the segment size.

@@ -8,7 +8,7 @@ bpl/*
 *.ll
 *.o
 
-# test data and run artifacts (regenerate with tools/make_testdata.sh)
+# benchmark inputs (regenerate with tools/make_testdata.sh)
 testdata/
 
 __pycache__/
