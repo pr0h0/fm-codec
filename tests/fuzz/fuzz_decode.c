@@ -3,8 +3,9 @@
    (magic and version, bb in 12-14 so tables stay small, L < 1 KB, mostly an accepted feature set, the header
    CRC; in a segmented file, every stream header that fits), so the fuzzer exercises the segment table, the model
    and the coder on garbage payloads and headers a forger could write. The segment lengths and count are left as
-   the fuzzer wrote them. Built with NO_FORK (segments decode one after another, as on Windows).
+   the fuzzer wrote them. NO_FORK: segments decode one after another, as on Windows.
    Build and run: make fuzz (tests/fuzz/run.sh). */
+#define NO_FORK 1   /* in-process: no fork() under libFuzzer, and out_open must not mkstemp next to /dev/null */
 #define main fm4_cli_main
 #include "../../c/fm4.c"
 #undef main
