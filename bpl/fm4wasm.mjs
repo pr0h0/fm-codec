@@ -38,23 +38,14 @@ export async function loadFm4Wasm(source) {
   return {
     encode(data, { level = 3, mode = "bytes", width = 0, height = 0, channels = 1 } = {}) {
       const m = mode === "image" || mode === "video" ? 2 : mode === "audio" ? 3 : 1;
-      let w = width;
-      if (m === 2 && (!(width > 0) || data.length % (3 * width))) throw new Error("bad width");
-      if (mode === "video") {
-        if (width > 65535 || !(height > 0) || height > 65535 || data.length % (3 * width * height)) throw new Error("video: bad frame size");
-        w = width + height * 65536;
-      }
-      if (m === 3) {
-        if (!(channels >= 1 && channels <= 8) || data.length % (2 * channels)) throw new Error("audio: need 1-8 channels and a whole number of 16-bit frames");
-        w = channels;
-      }
+      const w = widthField(data.length, mode, width, height, channels);
       const p = copyIn(data, m);
       const n = Number(x.fm4Encode(level, m, BigInt(w), p, BigInt(data.length)));
       return copyOut(n);
     },
     decode(buf) {
       // header checks first (magic, version, header CRC, table bits) so a corrupt byte can't size memory
-      const L = buf.length >= 36 ? Number(new DataView(buf.buffer, buf.byteOffset).getBigUint64(16, true)) : 0;
+      const L = buf.length >= HDR ? Number(new DataView(buf.buffer, buf.byteOffset).getBigUint64(16, true)) : 0;
       const ok = streamOk(buf, L) && (buf[4] === 0 || (buf[5] >= 12 && buf[5] <= 22));
       if (!ok) throw new Error("not an FM4 file");
       const m = buf[4];
@@ -71,21 +62,40 @@ export async function loadFm4Wasm(source) {
 // CRC-32 (IEEE) and the per-stream check before a segment's length is added up and allocated (stream_ok in c/fm4.c)
 const CRC_T = Uint32Array.from({ length: 256 }, (_, i) => { let c = i; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
 const crc32 = (u8) => { let c = 0xFFFFFFFF; for (const b of u8) c = CRC_T[(c ^ b) & 255] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; };
+const HDR = 36;   // FM4 header size
+// the header's width field for this shape (as c/fm4.c main checks it): image width, video width | height << 16,
+// audio channels; throws for a shape the encoder can't take
+const widthField = (n, mode, width, height, channels) => {
+  if (mode === "image" || mode === "video") {
+    if (!(width > 0) || width > 65535 || n % (3 * width)) throw new Error("bad width");
+    if (mode === "image") return width;
+    if (!(height > 0) || height > 65535 || n % (3 * width * height)) throw new Error("video: bad frame size");
+    return width + height * 65536;
+  }
+  if (mode === "audio") {
+    if (!(channels >= 1 && channels <= 8) || n % (2 * channels)) throw new Error("audio: need 1-8 channels and a whole number of 16-bit frames");
+    return channels;
+  }
+  return 0;
+};
+// the unit a segment cut may not split (seg_unit in c/fm4.c)
+const segUnit = (mode, width, height, channels) =>
+  mode === "video" ? 3 * width * height : mode === "image" ? 3 * width : mode === "audio" ? 2 * channels : 1;
 const streamOk = (s, L) => {
-  if (s.length < 36 || s[0] !== 70 || s[1] !== 77 || s[2] !== 52 || s[3] !== 2 || L > 2 ** 40) return false;
+  if (s.length < HDR || s[0] !== 70 || s[1] !== 77 || s[2] !== 52 || s[3] !== 2 || L > 2 ** 40) return false;
   if (new DataView(s.buffer, s.byteOffset).getUint32(32, true) !== crc32(s.subarray(0, 32))) return false;
-  return s[4] === 0 ? L <= s.length - 36 : Math.floor(L / 4096) <= s.length - 36;
+  return s[4] === 0 ? L <= s.length - HDR : Math.floor(L / 4096) <= s.length - HDR;
 };
 
-// ---- browser API: Web Worker pool and segmented video (FMV, same format and cut as c/fm4.c) ----
+// ---- browser API: Web Worker pool and segments (FMS, same format and cut as c/fm4.c) ----
 //   const fm4 = await createFm4(new URL("fm4.wasm", import.meta.url), { threads: 4 });
 //   const packed = await fm4.encode(data, { level, mode, width, height, channels });   // Promise<Uint8Array>
 //   const data = await fm4.decode(packed);  fm4.terminate();
-// All coding runs in workers (bpl/fm4worker.mjs), so the page stays responsive. Video of at least
-// 2 x segMB (default 64 MB) is cut into L / segMB runs of whole frames ("FMV\x01" | u32 n | n x (u64 len |
-// FM4 stream)), coded one segment per worker; the file is the same for any thread count. Each worker
-// needs about 500 MB for a 64 MB video segment (600-800 MB for text). Without Worker (Node) it runs
-// inline, one segment after another.
+// All coding runs in workers (bpl/fm4worker.mjs), so the page stays responsive. Input of at least
+// 2 x segMB (default 64 MB) is cut into L / segMB runs of whole units (byte, image row, video frame, audio
+// sample of every channel: "FMS\x01" | u32 n | n x (u64 len | FM4 stream)), coded one segment per worker; the
+// file is the same for any thread count. Each worker needs about 500 MB for a 64 MB video segment (600-800 MB
+// for text). Without Worker (Node) it runs inline, one segment after another.
 export async function createFm4(source, { threads, workerUrl = new URL("./fm4worker.mjs", import.meta.url) } = {}) {
   if (typeof source === "string" || source instanceof URL) source = await fetch(source);
   const module = source instanceof WebAssembly.Module ? source
@@ -94,7 +104,18 @@ export async function createFm4(source, { threads, workerUrl = new URL("./fm4wor
   const hw = (typeof navigator !== "undefined" && navigator.hardwareConcurrency) || 4;
   const max = Math.max(1, threads || Math.min(hw, 4));
   const useWorkers = typeof Worker !== "undefined";
-  let inline = null;
+  // without workers: one call at a time on one instance (chained), so an instance a trap may have left
+  // half-updated, or a failed load, is never reused: the next call loads a fresh one (as fm4worker.mjs)
+  // the chain's value is the instance for the next call; a call that throws, or a failed load, leaves null
+  let chain = Promise.resolve(null);
+  const runInline = (op, data, opts) => {
+    const r = chain.then(async (inst) => {
+      const fm4 = inst || await loadFm4Wasm(module);
+      return [fm4, op === "enc" ? fm4.encode(data, opts) : fm4.decode(data)];
+    });
+    chain = r.then(([fm4]) => fm4, () => null);
+    return r.then(([, out]) => out);
+  };
   const idle = [], all = [], queue = [];
   let seq = 0;
   const pump = () => {
@@ -114,20 +135,17 @@ export async function createFm4(source, { threads, workerUrl = new URL("./fm4wor
   };
   // data must own its buffer (it is transferred to the worker)
   const run = async (op, data, opts) => {
-    if (!useWorkers) {
-      inline ||= await loadFm4Wasm(module);
-      return op === "enc" ? inline.encode(data, opts) : inline.decode(data);
-    }
+    if (!useWorkers) return runInline(op, data, opts);
     return new Promise((resolve, reject) => { queue.push({ op, data, opts, resolve, reject }); pump(); });
   };
   const own = (u8, a = 0, b = u8.length) => u8.slice(a, b);
 
   return {
     async encode(data, opts = {}) {
-      const { mode = "bytes", width = 0, height = 0, segMB = 64 } = opts;
-      const fb = 3 * width * height;
-      if (mode === "video" && fb > 0 && data.length % fb === 0) {
-        const L = data.length, nf = L / fb, seg = segMB * 1048576;
+      const { mode = "bytes", width = 0, height = 0, channels = 1, segMB = 64 } = opts;
+      const fb = segUnit(mode, width, height, channels);   // invalid shapes go unsegmented and fail in encode()
+      if (fb > 0 && data.length % fb === 0) {
+        const L = data.length, nf = L / fb, seg = Math.floor(segMB * 1048576);
         let ns = seg > 0 ? Math.floor(L / seg) : 1;
         ns = ns > nf ? Math.max(nf, 1) : Math.max(ns, 1);
         if (ns > 1) {
@@ -135,7 +153,7 @@ export async function createFm4(source, { threads, workerUrl = new URL("./fm4wor
             run("enc", own(data, Math.floor(nf * k / ns) * fb, Math.floor(nf * (k + 1) / ns) * fb), opts)));
           const out = new Uint8Array(8 + parts.reduce((t, p) => t + 8 + p.length, 0));
           const dv = new DataView(out.buffer);
-          out.set([70, 77, 86, 1]); dv.setUint32(4, ns, true);
+          out.set([70, 77, 83, 1]); dv.setUint32(4, ns, true);
           let pos = 8;
           for (const p of parts) { dv.setBigUint64(pos, BigInt(p.length), true); out.set(p, pos + 8); pos += 8 + p.length; }
           return out;
@@ -145,11 +163,11 @@ export async function createFm4(source, { threads, workerUrl = new URL("./fm4wor
     },
     async decode(buf) {
       const n = buf.length;
-      if (!(n >= 8 && buf[0] === 70 && buf[1] === 77 && buf[2] === 86 && buf[3] === 1)) return run("dec", own(buf));
+      if (!(n >= 8 && buf[0] === 70 && buf[1] === 77 && buf[2] === 83 && buf[3] === 1)) return run("dec", own(buf));
       const dv = new DataView(buf.buffer, buf.byteOffset, n), ns = dv.getUint32(4, true), segs = [];
       let pos = 8, all = 0;
       for (let k = 0; k < ns; k++) {
-        if (n - pos < 44) throw new Error("not an FM4 file, or corrupt");
+        if (n - pos < 8 + HDR) throw new Error("not an FM4 file, or corrupt");
         const m = Number(dv.getBigUint64(pos, true)), L = Number(dv.getBigUint64(pos + 24, true));
         if (m > n - pos - 8 || !streamOk(buf.subarray(pos + 8, pos + 8 + m), L)) throw new Error("not an FM4 file, or corrupt");
         segs.push([pos + 8, m, L]); all += L; pos += 8 + m;
