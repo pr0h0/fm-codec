@@ -28,7 +28,7 @@ LEVELS = level_tables()
 
 def repair(d):  # mirrors LLVMFuzzerTestOneInput in fuzz_decode.c
     f = bytearray(d)
-    f[0:4] = b"FM4\x02"; f[5] = 12 + f[5] % 3
+    f[0:4] = b"FM4\x01"; f[5] = 12 + f[5] % 3
     if f[9] & 1:
         mode, level = f[4] & 3, 1 + f[8] % 5
         feat, feat2 = LEVELS[mode if mode else 1][level]

@@ -131,12 +131,12 @@ hashes must match on all three (the model uses IEEE double arithmetic without FM
 only `sqrt` and `floor`, which IEEE 754 defines exactly). On Windows segments and archive streams are coded one after another (no `fork`);
 the output is the same.
 
-**Integrity:** files are format 2 (`FM4\x02`, 36-byte header, described at the top of `c/fm4.c`) with a
+**Integrity:** files are format 1 (`FM4\x01`, 36-byte header, described at the top of `c/fm4.c`) with a
 CRC-32 of the header and of the original data. A corrupt file is rejected, never decoded to wrong data: the
 header CRC and a bound of L to about 2840x the payload stop a bad length before anything is allocated
 (also for every stream of an archive or segmented file, before their lengths are added up),
 decoding stops once it reads past the payload, and the data CRC is checked at the end. Until a first release
-the format may still change without a new version being readable by old builds (format 1 is no longer read);
+format 1 is the only format and may still change without old builds being able to read the new files;
 from then on, a new version is introduced only when existing decoders could not read the files.
 Decoders accept only the parameter sets the encoder's levels write (feature bits, table size, counter
 limit, mixer rate) and whole pixels, frames or samples, since other combinations would index past the model's

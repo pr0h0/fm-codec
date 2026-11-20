@@ -10,7 +10,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *d, size_t n) {
     if (n < HDR || n > 1 << 16) return 0;
     uint8_t *f = xmalloc(n);
     memcpy(f, d, n);
-    memcpy(f, "FM4\x02", 4);
+    memcpy(f, "FM4\x01", 4);
     f[5] = BB_MIN + f[5] % 3;
     if (f[9] & 1) {   /* mostly a feature set the decoder accepts (else the raw bits test the rejection) */
         int mode = f[4] & 3, level = 1 + f[8] % 5;

@@ -82,7 +82,7 @@ const widthField = (n, mode, width, height, channels) => {
 const segUnit = (mode, width, height, channels) =>
   mode === "video" ? 3 * width * height : mode === "image" ? 3 * width : mode === "audio" ? 2 * channels : 1;
 const streamOk = (s, L) => {
-  if (s.length < HDR || s[0] !== 70 || s[1] !== 77 || s[2] !== 52 || s[3] !== 2 || L > 2 ** 40) return false;
+  if (s.length < HDR || s[0] !== 70 || s[1] !== 77 || s[2] !== 52 || s[3] !== 1 || L > 2 ** 40) return false;
   if (new DataView(s.buffer, s.byteOffset).getUint32(32, true) !== crc32(s.subarray(0, 32))) return false;
   return s[4] === 0 ? L <= s.length - HDR : Math.floor(L / 4096) <= s.length - HDR;
 };

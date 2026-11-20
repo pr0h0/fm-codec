@@ -185,20 +185,20 @@ EOF
 done
 echo "corrupt inputs: $n runs"
 
-# ---- format 1 (version byte 1, header CRC valid) is rejected everywhere: single stream, segment, archive ----
+# ---- another version byte (2, header CRC valid) is rejected everywhere: single stream, segment, archive ----
 # AT = offset of the FM4 stream in the file (8 + 8 in a segmented file or an archive: magic, count, u64 length)
 for t in "text.txt.4.fm4 0" "s1 16" "a1.fma 16"; do
     set -- $t
     python3 -c "
 import sys, zlib, struct
-d = bytearray(open(sys.argv[1], 'rb').read()); at = int(sys.argv[3]); d[at + 3] = 1
+d = bytearray(open(sys.argv[1], 'rb').read()); at = int(sys.argv[3]); d[at + 3] = 2
 d[at + 32:at + 36] = struct.pack('<I', zlib.crc32(bytes(d[at:at + 32])))
-open(sys.argv[2], 'wb').write(d)" "$D/$1" "$D/v1_$1" "$2"
-    rm -rf "$D/v1x"; mkdir "$D/v1x"
+open(sys.argv[2], 'wb').write(d)" "$D/$1" "$D/v2_$1" "$2"
+    rm -rf "$D/v2x"; mkdir "$D/v2x"
     for bin in "$C" $( [ $nb = 1 ] && echo "$B" ); do
-        if [ "$1" = a1.fma ]; then [ "$bin" = "$C" ] || continue; (cd "$D/v1x" && $bin x "$D/v1_$1" . >/dev/null 2>&1); rc=$?
-        else (cd "$D/v1x" && $bin dec "$D/v1_$1" out >/dev/null 2>&1); rc=$?; fi
-        [ $rc = 1 ] && [ -z "$(ls -A "$D/v1x")" ] || bad "$(basename "$bin"): a version-1 stream in $1 was accepted or left files (exit $rc)"
+        if [ "$1" = a1.fma ]; then [ "$bin" = "$C" ] || continue; (cd "$D/v2x" && $bin x "$D/v2_$1" . >/dev/null 2>&1); rc=$?
+        else (cd "$D/v2x" && $bin dec "$D/v2_$1" out >/dev/null 2>&1); rc=$?; fi
+        [ $rc = 1 ] && [ -z "$(ls -A "$D/v2x")" ] || bad "$(basename "$bin"): a version-2 stream in $1 was accepted or left files (exit $rc)"
     done
 done
 if [ $nw = 1 ]; then node -e '
@@ -210,7 +210,7 @@ if [ $nw = 1 ]; then node -e '
     try { fm4.decode(new Uint8Array(fs.readFileSync(process.argv[2]))); } catch (e) { ok += /not an FM4 file/.test(e.message); }
     try { await pool.decode(new Uint8Array(fs.readFileSync(process.argv[3]))); } catch (e) { ok += /not an FM4 file/.test(e.message); }
     process.exit(ok === 2 ? 0 : 1);
-  });' "$R/bpl" "$D/v1_text.txt.4.fm4" "$D/v1_s1" || bad "wasm: a version-1 stream was not rejected"; fi
+  });' "$R/bpl" "$D/v2_text.txt.4.fm4" "$D/v2_s1" || bad "wasm: a version-2 stream was not rejected"; fi
 
 # ---- the file-backed paths (inputs mapped, output written in place, temporary files for big buffers) run
 # only from 64 MB; FM4_BIG=1 runs them on the small inputs: same files, and no temporary files left behind ----
