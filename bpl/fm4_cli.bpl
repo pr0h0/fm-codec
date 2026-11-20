@@ -331,7 +331,8 @@ frame segments(L: long, unit: long) ret long {
 }
 
 # One forked process per job, at most `threads` at once. Encode: in/L -> out = u64 length | stream
-# (out holds 8 + L + HDR bytes). Decode: in/n -> out, exactly L bytes. Returns 0 when every job succeeded.
+# (out holds 8 + L + HDR bytes). Decode: in/n -> out, exactly L bytes. Returns 0 when every job succeeded, 3 when
+# the only failures were FM4_CHECK_SPEC misses (specMissed, reported by the worker), else 1.
 frame runJobs(nj: long, threads: long, decode: bool, mode: int, level: int, width: long, ins: **u8, ns: *long, Ls: *long, outs: **u8) ret int {
     local next: long = 0;
     local running: long = 0;
@@ -355,20 +356,14 @@ frame runJobs(nj: long, threads: long, decode: bool, mode: int, level: int, widt
                     if (m != Ls[j]) {
                         _exit(1);
                     }
-                    if (specMissed()) {
-                        fflush(nullptr);   # _exit skips the stdio flush
-                        _exit(3);
-                    }
+                    exitIfSpecMissed();
                     if (fm4Result() != outs[j]) {
                         memcpy(cast<*void>(outs[j]), cast<*void>(fm4Result()), m);
                     }
                 } else {
                     local m2: long = encodeTo(level, mode, width, ins[j], Ls[j], &outs[j][8]);   # straight into the shared output
                     put64(outs[j], m2);
-                    if (specMissed()) {
-                        fflush(nullptr);   # _exit skips the stdio flush
-                        _exit(3);
-                    }
+                    exitIfSpecMissed();
                     if (fm4Result() != &outs[j][8]) {
                         memcpy(cast<*void>(&outs[j][8]), cast<*void>(fm4Result()), m2);
                     }
@@ -423,6 +418,14 @@ frame specMissed() ret bool {
     return false;
 }
 
+# a worker's FM4_CHECK_SPEC miss: exit 3 (runJobs passes it on); stdout is flushed first, as _exit skips it
+frame exitIfSpecMissed() {
+    if (specMissed()) {
+        fflush(nullptr);
+        _exit(3);
+    }
+}
+
 frame encSegments(level: int, mode: int, width: long, data: *u8, L: long, ns: long, threads: long, out: string) ret int {
     local unit: long = segUnit(mode, width);
     local nu: long = L / unit;
@@ -470,7 +473,7 @@ frame encSegments(level: int, mode: int, width: long, data: *u8, L: long, ns: lo
     return 0;
 }
 
-# Decodes straight into the file out. Returns 0, or 1 for a corrupt file.
+# Decodes straight into the file out. Returns 0, 1 for a corrupt file, or 3 for an FM4_CHECK_SPEC miss.
 frame decSegments(f: *u8, n: long, threads: long, out: string) ret int {
     local ns: long = get64(&f[4]) & 4294967295;
     if (ns > (n - 8) / (8 + HDR)) {   # each segment takes at least 8 + HDR bytes

@@ -125,7 +125,8 @@ for t in "text.txt 2 bytes" "x86.bin 3 bytes" "img_96.rgb 3 image 96" "audio_2.p
 done
 
 # createFm4 without workers (Node) runs calls one at a time; a corrupt segmented file must reject without
-# breaking the calls queued next to it, and a call after the failure must load a fresh instance and succeed
+# breaking the calls queued next to it, and a later call must still succeed (whether that call got a fresh
+# instance is not observable from here)
 if [ $nw = 1 ]; then
     SEG_MB=0.005 $C enc 3 bytes "$D/in/text.txt" "$D/inl.fms" || bad "C enc for the inline-pool check"
     node -e '
