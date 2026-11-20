@@ -209,6 +209,8 @@ if [ $nb = 1 ]; then
         $B enc 4 bytes text.txt tb.fm4 && cmp -s tb.fm4 t.fm4 && $B dec tb.fm4 t.out && cmp -s t.out text.txt &&
         $B enc 4 bytes x86.bin eb.fm4 && cmp -s eb.fm4 e.fm4 && $B dec eb.fm4 e.out && cmp -s e.out x86.bin &&
         $B enc -t 2 4 video 64 48 video_64x48.rgb vb.fmv && cmp -s vb.fmv v.fmv && $B dec vb.fmv v.out && cmp -s v.out video_64x48.rgb &&
+        SEG_MB=0.005 $C enc -t 2 4 bytes x86.bin es.fms && SEG_MB=0.005 $B enc -t 2 4 bytes x86.bin esb.fms && cmp -s es.fms esb.fms &&
+        cmp -s x86.bin "$D/in/x86.bin" &&
         ! $B dec a.fma badb.out >/dev/null 2>&1 && none_like badb.out* .fm4-* ./*.fm4-*) || bad "BPL file-backed paths (FM4_BIG=1)"
 fi
 

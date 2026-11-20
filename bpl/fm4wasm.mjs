@@ -39,7 +39,7 @@ export async function loadFm4Wasm(source) {
     encode(data, { level = 3, mode = "bytes", width = 0, height = 0, channels = 1 } = {}) {
       const m = mode === "image" || mode === "video" ? 2 : mode === "audio" ? 3 : 1;
       let w = width;
-      if (m === 2 && (!(width > 0) || data.length % (3 * width))) throw new Error("bad width");
+      if (m === 2 && (!(width > 0) || width > 65535 || data.length % (3 * width))) throw new Error("bad width");
       if (mode === "video") {
         if (width > 65535 || !(height > 0) || height > 65535 || data.length % (3 * width * height)) throw new Error("video: bad frame size");
         w = width + height * 65536;
@@ -54,7 +54,7 @@ export async function loadFm4Wasm(source) {
     },
     decode(buf) {
       // header checks first (magic, version, header CRC, table bits) so a corrupt byte can't size memory
-      const L = buf.length >= 36 ? Number(new DataView(buf.buffer, buf.byteOffset).getBigUint64(16, true)) : 0;
+      const L = buf.length >= HDR ? Number(new DataView(buf.buffer, buf.byteOffset).getBigUint64(16, true)) : 0;
       const ok = streamOk(buf, L) && (buf[4] === 0 || (buf[5] >= 12 && buf[5] <= 22));
       if (!ok) throw new Error("not an FM4 file");
       const m = buf[4];
@@ -71,10 +71,14 @@ export async function loadFm4Wasm(source) {
 // CRC-32 (IEEE) and the per-stream check before a segment's length is added up and allocated (stream_ok in c/fm4.c)
 const CRC_T = Uint32Array.from({ length: 256 }, (_, i) => { let c = i; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
 const crc32 = (u8) => { let c = 0xFFFFFFFF; for (const b of u8) c = CRC_T[(c ^ b) & 255] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; };
+const HDR = 36;   // FM4 header size
+// the unit a segment cut may not split (seg_unit in c/fm4.c)
+const segUnit = (mode, width, height, channels) =>
+  mode === "video" ? 3 * width * height : mode === "image" ? 3 * width : mode === "audio" ? 2 * channels : 1;
 const streamOk = (s, L) => {
-  if (s.length < 36 || s[0] !== 70 || s[1] !== 77 || s[2] !== 52 || s[3] !== 2 || L > 2 ** 40) return false;
+  if (s.length < HDR || s[0] !== 70 || s[1] !== 77 || s[2] !== 52 || s[3] !== 2 || L > 2 ** 40) return false;
   if (new DataView(s.buffer, s.byteOffset).getUint32(32, true) !== crc32(s.subarray(0, 32))) return false;
-  return s[4] === 0 ? L <= s.length - 36 : Math.floor(L / 4096) <= s.length - 36;
+  return s[4] === 0 ? L <= s.length - HDR : Math.floor(L / 4096) <= s.length - HDR;
 };
 
 // ---- browser API: Web Worker pool and segments (FMS, same format and cut as c/fm4.c) ----
@@ -125,8 +129,7 @@ export async function createFm4(source, { threads, workerUrl = new URL("./fm4wor
   return {
     async encode(data, opts = {}) {
       const { mode = "bytes", width = 0, height = 0, channels = 1, segMB = 64 } = opts;
-      // the unit a cut may not split (seg_unit in c/fm4.c); invalid shapes go unsegmented and fail in encode()
-      const fb = mode === "video" ? 3 * width * height : mode === "image" ? 3 * width : mode === "audio" ? 2 * channels : 1;
+      const fb = segUnit(mode, width, height, channels);   // invalid shapes go unsegmented and fail in encode()
       if (fb > 0 && data.length % fb === 0) {
         const L = data.length, nf = L / fb, seg = Math.floor(segMB * 1048576);
         let ns = seg > 0 ? Math.floor(L / seg) : 1;
@@ -150,7 +153,7 @@ export async function createFm4(source, { threads, workerUrl = new URL("./fm4wor
       const dv = new DataView(buf.buffer, buf.byteOffset, n), ns = dv.getUint32(4, true), segs = [];
       let pos = 8, all = 0;
       for (let k = 0; k < ns; k++) {
-        if (n - pos < 44) throw new Error("not an FM4 file, or corrupt");
+        if (n - pos < 8 + HDR) throw new Error("not an FM4 file, or corrupt");
         const m = Number(dv.getBigUint64(pos, true)), L = Number(dv.getBigUint64(pos + 24, true));
         if (m > n - pos - 8 || !streamOk(buf.subarray(pos + 8, pos + 8 + m), L)) throw new Error("not an FM4 file, or corrupt");
         segs.push([pos + 8, m, L]); all += L; pos += 8 + m;

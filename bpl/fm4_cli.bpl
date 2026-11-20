@@ -40,7 +40,7 @@ extern signal(sig: int, handler: Func<void>(int)) ret Func<void>(int);
 extern kill(pid: int, sig: int) ret int;
 extern getpid() ret int;
 
-global HDR_MAX: long = 36;   # the FM4 header: an encoded stream is at most L + HDR_MAX bytes
+global HDR: long = 36;   # the FM4 header (fm4_core.bpl): an encoded stream is at most L + HDR bytes
 global USAGE: string = "usage: fm4 enc LEVEL(0-5) bytes IN OUT | fm4 enc LEVEL image WIDTH IN OUT | fm4 enc LEVEL audio CHANNELS IN OUT | fm4 enc LEVEL video WIDTH HEIGHT IN OUT | fm4 dec IN OUT | fm4 enc|dec -t N ...\n";
 
 # Working memory for L input bytes on 2 MB huge pages where the system gives them (fewer TLB misses
@@ -313,25 +313,25 @@ frame segUnit(mode: int, width: long) ret long {
     return 1;
 }
 
-frame segments(L: long, fbytes: long) ret long {
+frame segments(L: long, unit: long) ret long {
     local mb: double = 64.0;
     if (getenv("SEG_MB") != nullptr) {
         mb = atof(getenv("SEG_MB"));
     }
     local seg: long = cast<long>(mb * 1048576.0);
-    local nf: long = L / fbytes;
+    local nu: long = L / unit;
     local ns: long = 1;
     if (seg > 0) {
         ns = L / seg;
     }
-    if (ns > nf) {
-        return (nf > 0) ? nf : 1;
+    if (ns > nu) {
+        return (nu > 0) ? nu : 1;
     }
     return (ns < 1) ? 1 : ns;
 }
 
 # One forked process per job, at most `threads` at once. Encode: in/L -> out = u64 length | stream
-# (out holds L + 36 bytes). Decode: in/n -> out, exactly L bytes. Returns 0 when every job succeeded.
+# (out holds 8 + L + HDR bytes). Decode: in/n -> out, exactly L bytes. Returns 0 when every job succeeded.
 frame runJobs(nj: long, threads: long, decode: bool, mode: int, level: int, width: long, ins: **u8, ns: *long, Ls: *long, outs: **u8) ret int {
     local next: long = 0;
     local running: long = 0;
@@ -359,10 +359,11 @@ frame runJobs(nj: long, threads: long, decode: bool, mode: int, level: int, widt
                         memcpy(cast<*void>(outs[j]), cast<*void>(fm4Result()), m);
                     }
                 } else {
-                    hugeArena(Ls[j], mode);
-                    local m2: long = fm4Encode(level, mode, width, ins[j], Ls[j]);
+                    local m2: long = encodeTo(level, mode, width, ins[j], Ls[j], &outs[j][8]);   # straight into the shared output
                     put64(outs[j], m2);
-                    memcpy(cast<*void>(&outs[j][8]), cast<*void>(fm4Result()), m2);
+                    if (fm4Result() != &outs[j][8]) {
+                        memcpy(cast<*void>(&outs[j][8]), cast<*void>(fm4Result()), m2);
+                    }
                 }
                 _exit(0);
             }
@@ -377,18 +378,38 @@ frame runJobs(nj: long, threads: long, decode: bool, mode: int, level: int, widt
     return fail;
 }
 
+# Encodes one stream (the whole input, or one segment in a worker); result in fm4Result(). out: a buffer of
+# L + HDR bytes for the result, or nullptr. A large x86-like input gets a file-backed copy first: the E8/E9 pass
+# rewrites nearly every page, which on a mapped input would become anonymous memory (as in c/fm4.c).
+frame encodeTo(level: int, mode: int, width: long, data0: *u8, L: long, out: *u8) ret long {
+    local data: *u8 = data0;
+    hugeArena(L, mode);
+    if (mode == 1 && L >= BIG && level >= 1 && e8e9Detect(data, L)) {
+        local cp: *u8 = mapTemp(L);
+        if (cp != nullptr) {
+            memcpy(cast<*void>(cp), cast<*void>(data), L);
+            data = cp;
+            fm4InputIsScratch();   # no need to undo the transform on the copy afterwards
+        }
+    }
+    if (out != nullptr) {
+        fm4UseBuffer(out, L + HDR);
+    }
+    return fm4Encode(level, mode, width, data, L);
+}
+
 frame encSegments(level: int, mode: int, width: long, data: *u8, L: long, ns: long, threads: long, out: string) ret int {
-    local fbytes: long = segUnit(mode, width);
-    local nf: long = L / fbytes;
+    local unit: long = segUnit(mode, width);
+    local nu: long = L / unit;
     local ins: **u8 = cast<**u8>(xalloc(ns * 8));
     local Ls: *long = cast<*long>(xalloc(ns * 8));
     local outs: **u8 = cast<**u8>(xalloc(ns * 8));
     loop (local k: long = 0; k < ns; k = k + 1) {
-        local a: long = nf * k / ns * fbytes;
-        local b: long = nf * (k + 1) / ns * fbytes;
+        local a: long = nu * k / ns * unit;
+        local b: long = nu * (k + 1) / ns * unit;
         ins[k] = &data[a];
         Ls[k] = b - a;
-        outs[k] = shared(b - a + HDR_MAX + 8);
+        outs[k] = shared(b - a + HDR + 8);
         if (outs[k] == nullptr) {
             printf("mmap failed\n");
             return 1;
@@ -423,7 +444,7 @@ frame encSegments(level: int, mode: int, width: long, data: *u8, L: long, ns: lo
 # Decodes straight into the file out. Returns 0, or 1 for a corrupt file.
 frame decSegments(f: *u8, n: long, threads: long, out: string) ret int {
     local ns: long = get64(&f[4]) & 4294967295;
-    if (ns > (n - 8) / (8 + HDR_MAX)) {   # each segment takes at least 8 + HDR_MAX bytes
+    if (ns > (n - 8) / (8 + HDR)) {   # each segment takes at least 8 + HDR bytes
         return 1;
     }
     local ins: **u8 = cast<**u8>(xalloc(ns * 8 + 8));
@@ -433,7 +454,7 @@ frame decSegments(f: *u8, n: long, threads: long, out: string) ret int {
     local all: long = 0;
     local pos: long = 8;
     loop (local k: long = 0; k < ns; k = k + 1) {
-        if (n - pos < 8 + HDR_MAX) {
+        if (n - pos < 8 + HDR) {
             return 1;
         }
         local m: long = get64(&f[pos]);
@@ -513,7 +534,7 @@ frame main(argc: int, argv: *string) ret int {
         if (data == nullptr) {
             return 1;
         }
-        if (mode == 2 && (width <= 0 || L % (3 * width) != 0)) {
+        if (mode == 2 && (width <= 0 || width > 65535 || L % (3 * width) != 0)) {
             printf("bad width\n");
             return 1;
         }
@@ -532,24 +553,11 @@ frame main(argc: int, argv: *string) ret int {
         if (ns > 1) {
             return encSegments(level, mode, width, data, L, ns, threads, argv[ia + 1]);
         }
-        hugeArena(L, mode);
-        if (mode == 1 && L >= BIG && level >= 1 && e8e9Detect(data, L)) {
-            # the E8/E9 pass rewrites nearly every page: on a mapped input those would become anonymous memory,
-            # so the encoder gets a file-backed copy (as in c/fm4.c)
-            local cp: *u8 = mapTemp(L);
-            if (cp != nullptr) {
-                memcpy(cast<*void>(cp), cast<*void>(data), L);
-                data = cp;
-                fm4InputIsScratch();   # no need to undo the transform on the copy afterwards
-            }
+        local eb: *u8 = nullptr;
+        if (L + HDR >= BIG) {
+            eb = mapTemp(L + HDR);   # the result (at most L + HDR bytes) in a temporary file
         }
-        if (L + 36 >= BIG) {
-            local eb: *u8 = mapTemp(L + 36);   # the result (at most L + 36 bytes) in a temporary file
-            if (eb != nullptr) {
-                fm4UseBuffer(eb, L + 36);
-            }
-        }
-        local n: long = fm4Encode(level, mode, width, data, L);
+        local n: long = encodeTo(level, mode, width, data, L, eb);
         return spit(argv[ia + 1], fm4Result(), n);
     }
     if (argc == 4 && strcmp(argv[1], "dec") == 0) {
@@ -568,8 +576,8 @@ frame main(argc: int, argv: *string) ret int {
             }
             return 0;
         }
-        local hL: long = (n >= HDR_MAX) ? get64(&f[16]) : -1;
-        if (n < HDR_MAX || !fm4StreamOk(f, n, hL)) {
+        local hL: long = (n >= HDR) ? get64(&f[16]) : -1;
+        if (n < HDR || !fm4StreamOk(f, n, hL)) {
             printf("not an FM4 file\n");
             return 1;
         }
