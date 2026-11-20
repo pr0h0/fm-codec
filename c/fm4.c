@@ -10,9 +10,8 @@
  *   | feat u32 | width u32 | L u64 | feat2 u32 | CRC-32 of the data u32 | CRC-32 of header bytes 0-31 u32
  *   | payload (store: raw bytes; else the arithmetic coder's bytes, all of them)
  *   width: image width; audio: channels (1-8); video: width | frame height << 16.
- *   Format 1 ("FM4\x01", 28 bytes: no CRCs, trailing zero bytes of the payload stripped) is still decoded.
- *   The version byte changes whenever an existing decoder could not read the new files; decoders keep reading
- *   every earlier version.
+ *   The version byte changes whenever an existing decoder could not read the new files. Until a release, decoders
+ *   read only the current version (format 1, 28 bytes without CRCs, is no longer read).
  *
  * Feature bits 2 (feat2):
  *   1 mixer selection by hit count   2 4th mixer   4 text contexts   8 run inputs   16 OLS predictor
@@ -73,8 +72,7 @@
 
 #define MAXIN 96
 #define NPRED 12
-#define HDR 36    /* header size, format 2 (format 1: 28) */
-#define HDR1 28
+#define HDR 36    /* header size */
 #define MBITS 22
 #define AERR_RING 128   /* > 8 frames x 8 channels, a power of two */
 #define BB_MIN 12   /* table bits (log2 buckets per context) a file may use */
@@ -862,25 +860,21 @@ static uint8_t *fm4_encode(int level, int mode, int64_t width, uint8_t *data, in
     *outLen = bestLen;
     return best;
 }
-/* Checks of one FM4 stream (m >= HDR1 bytes at s, decoded length L) that need no decoding: the fixed cap, and for
-   format 2 the header CRC and the L bound. fm4_decode starts with it; containers call it for each stream before
-   adding the lengths up and allocating. */
+/* Checks of one FM4 stream (m bytes at s, decoded length L) that need no decoding: magic and version, header CRC,
+   and L bounded by the payload (no zero bytes are stripped, and every coded bit has p in [1, 4095]/4096 so costs at
+   least log2(4096/4095) bits: at most ~2840 bytes per payload byte; 50 MB of zeros: 2838). fm4_decode starts with
+   it; containers call it for each stream before adding the lengths up and allocating. Decoding then stops at the
+   end of the payload, and the CRC of the result must match. */
 static int stream_ok(const uint8_t *s, int64_t m, int64_t L) {
-    if (L < 0 || L > (int64_t)1 << 40) return 0;
-    if (s[3] != 2) return 1;
-    return m >= HDR && get32(s + 32) == crc32_of(s, 32) && (s[4] == 0 ? L <= m - HDR : L / 4096 <= m - HDR);
+    if (m < HDR || memcmp(s, "FM4\x02", 4) || L < 0 || L > (int64_t)1 << 40) return 0;
+    return get32(s + 32) == crc32_of(s, 32) && (s[4] == 0 ? L <= m - HDR : L / 4096 <= m - HDR);
 }
-/* Format 2 (written): header CRC checked first, L bounded by the payload (no zero bytes are stripped, and every
-   coded bit has p in [1, 4095]/4096 so costs at least log2(4096/4095) bits: at most ~2840 bytes per payload byte;
-   50 MB of zeros: 2838), decoding stops at the end of the payload, and the CRC of the result must match.
-   Format 1 (read only): trailing zero bytes were stripped, so L can only have a fixed cap and nothing is checked. */
 /* get(L, ctx) supplies the output buffer once L is known and checked (NULL: malloc); NULL result: corrupt */
 static uint8_t *fm4_decode_to(uint8_t *f, int64_t n, int64_t *outLen, uint8_t *(*get)(int64_t, void *), void *ctx) {
-    if (n < HDR1 || memcmp(f, "FM4", 3) || f[3] < 1 || f[3] > 2) return NULL;
-    int v2 = f[3] == 2, hd = v2 ? HDR : HDR1;
-    int mode = f[4], bb = f[5], limit = f[6]; uint32_t feat = get32(f + 8), feat2 = get32(f + 24);
+    if (n < HDR) return NULL;
+    int hd = HDR, mode = f[4], bb = f[5], limit = f[6]; uint32_t feat = get32(f + 8), feat2 = get32(f + 24);
     int64_t width = get32(f + 12), L = get64(f + 16);
-    if (!stream_ok(f, n, L)) return NULL;   /* format 2: header CRC and L bound */
+    if (!stream_ok(f, n, L)) return NULL;   /* magic, header CRC and L bound */
     if (mode > 3 || (mode == 2 && !(width & 0xFFFF)) || (mode == 3 && (width < 1 || width > 8))) return NULL;   /* corrupt header */
     if (mode && (bb < BB_MIN || bb > BB_DEC_MAX || !params_ok(mode, feat, feat2, width, limit, f[7]))) return NULL;   /* the encoder never writes others */
     if (mode == 0 && L > n - hd) return NULL;
@@ -891,13 +885,13 @@ static uint8_t *fm4_decode_to(uint8_t *f, int64_t n, int64_t *outLen, uint8_t *(
     if (mode == 0) memcpy(data, f + hd, L);
     else {
         LR = f[7];
-        Coder c = {0, 0xFFFFFFFFu, 0, f + hd, n - hd, 0, 0, 1, v2 ? n - hd : INT64_MAX};
+        Coder c = {0, 0xFFFFFFFFu, 0, f + hd, n - hd, 0, 0, 1, n - hd};
         for (int i = 0; i < 4; i++) c.x = (c.x << 8) | (c.pos < c.len ? c.buf[c.pos] : 0), c.pos++;
         run(&c, mode, bb, limit, feat, feat2, width, data, L);
         if (c.pos > c.end) { if (!get) free(data); return NULL; }   /* read past the end: corrupt */
         if (feat & 64) e8e9(data, L, 0);
     }
-    if (v2 && crc32_of(data, L) != get32(f + 28)) { if (!get) free(data); return NULL; }
+    if (crc32_of(data, L) != get32(f + 28)) { if (!get) free(data); return NULL; }
     *outLen = L;
     return data;
 }
@@ -941,18 +935,17 @@ static void *map_temp(int64_t n) {   /* n bytes in an unlinked temporary file, s
     close(fd); return p;
 }
 #endif
-/* memory the coding processes write their results into (shared with them; Windows: plain memory).
-   file: may be a temporary file (only for lengths that are bounded by input size, see Out) */
-static uint8_t *shared_alloc_f(int64_t n, int file) {
+/* memory the coding processes write their results into (shared with them; a temporary file when large;
+   Windows: plain memory) */
+static uint8_t *shared_alloc(int64_t n) {
 #ifdef NO_FORK
-    (void)file; return malloc(n ? n : 1);
+    return malloc(n ? n : 1);
 #else
-    void *p = file && n >= BIG ? map_temp(n) : NULL;
+    void *p = n >= BIG ? map_temp(n) : NULL;
     if (!p) p = mmap(NULL, n ? n : 1, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     return p == MAP_FAILED ? NULL : p;
 #endif
 }
-#define shared_alloc(n) shared_alloc_f(n, 1)
 /* private working memory (the encoder's output); release with scratch_free(p, n) */
 static uint8_t *scratch(int64_t n) {
 #ifndef NO_FORK
@@ -987,12 +980,11 @@ static uint8_t *map_in(const char *path, int64_t *n) {
 #endif
     return slurp(path, n);
 }
-/* Output written in place. out_open(o, n, to_file) gives the buffer, out_close(o, ok) publishes it as o->path.
-   to_file (POSIX): a mapping of a new temporary file next to path (mkstemp, so no existing file is touched),
+/* Output written in place. out_open(o, n) gives the buffer, out_close(o, ok) publishes it as o->path.
+   POSIX: a mapping of a new temporary file next to path (mkstemp, so no existing file is touched),
    with its disk space reserved; renamed to path on success, removed on failure. Only for lengths bounded by the
-   input (format 2: ~2840x the payload): a format-1 header may claim up to 2^40 bytes with no bound at all, and
-   is decoded into memory, where an absurd length fails at the allocation. Windows: memory, written at the end. */
-typedef struct { const char *path; char tmp[4200]; uint8_t *p; int64_t n; int mapped, v2, ioerr; } Out;
+   input (stream_ok: ~2840x the payload). Windows: memory, written at the end. */
+typedef struct { const char *path; char tmp[4200]; uint8_t *p; int64_t n; int mapped, ioerr; } Out;
 static int spit(const char *path, uint8_t *b, int64_t n);
 #ifndef NO_FORK
 /* An interrupted decode removes its temporary output (it has the full size reserved), then dies of the signal
@@ -1012,10 +1004,10 @@ static void pending(const char *t) {
     }
 }
 #endif
-static uint8_t *out_open(Out *o, int64_t n, int to_file) {
+static uint8_t *out_open(Out *o, int64_t n) {
     o->n = n; o->mapped = 0;
 #ifndef NO_FORK
-    if (to_file && n > 0) {
+    if (n > 0) {
         snprintf(o->tmp, sizeof o->tmp, "%s.fm4-XXXXXX", o->path);   /* recognisable if a crash leaves it */
         int fd = mkstemp(o->tmp);
         if (fd < 0) { perror(o->tmp); o->ioerr = 1; return NULL; }
@@ -1027,7 +1019,6 @@ static uint8_t *out_open(Out *o, int64_t n, int to_file) {
         return o->p = p;
     }
 #endif
-    (void)to_file;
     return o->p = xmalloc(n ? n : 1);
 }
 static int out_close(Out *o, int ok) {   /* 0: published */
@@ -1249,20 +1240,19 @@ static int archive(int level, int media, int threads, const char *out, char **pa
 static int extract(const char *in, const char *dir, int threads) {
     int64_t n, sn = 0, all = 0; uint8_t *f = map_in(in, &n);
     if (n < 8 || memcmp(f, "FMA\x02", 4)) { fprintf(stderr, "not an FMA archive\n"); return 1; }
-    int64_t nsolid = get32(f + 4), nj = 0, cap = 0; Job *jobs = NULL; int v2 = 1;
+    int64_t nsolid = get32(f + 4), nj = 0, cap = 0; Job *jobs = NULL;
     for (int64_t pos = 8; pos < n; ) {   /* list the streams, then decode them all in parallel into one shared buffer */
-        if (n - pos < 8 + HDR1) goto bad;
+        if (n - pos < 8 + HDR) goto bad;
         int64_t m = get64(f + pos), L = get64(f + pos + 8 + 16);
-        if (m < HDR1 || m > n - pos - 8 || !stream_ok(f + pos + 8, m, L) || all + L < all) goto bad;
+        if (m > n - pos - 8 || !stream_ok(f + pos + 8, m, L) || all + L < all) goto bad;
         if (nj == cap) jobs = alloc_ok(realloc(jobs, (cap = 2 * cap + 16) * sizeof(Job)));
         jobs[nj] = (Job){0, 0, 0, L, m, f + pos + 8, NULL, 0};
-        v2 &= f[pos + 8 + 3] == 2;
         if (nj++ < nsolid) sn += L;
         all += L; pos += 8 + m;
     }
     if (nsolid < 1 || nj < nsolid || sn < 4) goto bad;
     if (mkdir(dir, 0777) && errno != EEXIST) { perror(dir); return 1; }
-    uint8_t *s = shared_alloc_f(all, v2), *o = s;   /* every decoded stream (file-backed when large; format 2 only, see Out) */
+    uint8_t *s = shared_alloc(all), *o = s;   /* every decoded stream (file-backed when large) */
     if (!s) goto bad;
     for (int64_t i = 0; i < nj; i++) { jobs[i].out = o; o += jobs[i].L; }
     if (run_jobs(jobs, nj, threads, 1)) goto bad;
@@ -1325,29 +1315,24 @@ static int enc_video_segments(int level, int64_t width, uint8_t *data, int64_t L
     return 0;
 }
 static int dec_video_segments(uint8_t *f, int64_t n, int threads, Out *out) {   /* 0 on success, 1: corrupt or failed */
-    int64_t ns = get32(f + 4), all = 0, pos = 8; int v2 = 1;
-    if (ns > (n - 8) / (8 + HDR1)) return 1;   /* each segment takes at least 8 + HDR1 bytes */
+    int64_t ns = get32(f + 4), all = 0, pos = 8;
+    if (ns > (n - 8) / (8 + HDR)) return 1;   /* each segment takes at least 8 + HDR bytes */
     Job *jobs = xcalloc(ns ? ns : 1, sizeof(Job));
     for (int64_t k = 0; k < ns; k++) {
-        if (n - pos < 8 + HDR1) return 1;
+        if (n - pos < 8 + HDR) return 1;
         int64_t m = get64(f + pos), L = get64(f + pos + 8 + 16);
-        if (m < HDR1 || m > n - pos - 8 || !stream_ok(f + pos + 8, m, L) || all + L < all) return 1;
+        if (m > n - pos - 8 || !stream_ok(f + pos + 8, m, L) || all + L < all) return 1;
         jobs[k] = (Job){0, 0, 0, L, m, f + pos + 8, NULL, 0};
-        v2 &= f[pos + 8 + 3] == 2;
         all += L; pos += 8 + m;
     }
     if (pos != n) return 1;
-    /* the segments decode straight into the output file (format 2: lengths bounded by the input) */
-    uint8_t *d = v2 ? out_open(out, all, 1) : (out->n = all, out->p = shared_alloc_f(all, 0)), *o = d;
+    /* the segments decode straight into the output file (lengths bounded by the input) */
+    uint8_t *d = out_open(out, all), *o = d;
     if (!d) return 1;
     for (int64_t k = 0; k < ns; k++) { jobs[k].out = o; o += jobs[k].L; }
-    int ok = !run_jobs(jobs, ns, threads, 1);
-#ifndef NO_FORK
-    if (!v2) { int r = ok ? spit(out->path, d, all) : 1; if (ok && r) out->ioerr = 1; munmap(d, all ? all : 1); return r; }
-#endif
-    return out_close(out, ok);
+    return out_close(out, !run_jobs(jobs, ns, threads, 1));
 }
-static uint8_t *out_get(int64_t L, void *ctx) { Out *o = ctx; return out_open(o, L, o->v2); }
+static uint8_t *out_get(int64_t L, void *ctx) { return out_open(ctx, L); }
 static int ncpu(void) {
 #ifdef NO_FORK
     return 1;
@@ -1406,7 +1391,6 @@ int main(int argc, char **argv) {
         int bad;
         if (n >= 8 && !memcmp(f, "FMV\x01", 4)) bad = dec_video_segments(f, n, threads, &o);
         else {   /* decode straight into the output file */
-            o.v2 = n >= 4 && f[3] == 2;
             uint8_t *d = fm4_decode_to(f, n, &L, out_get, &o);
             bad = o.p ? out_close(&o, d != NULL) : 1;
         }

@@ -13,8 +13,7 @@ import sqrt, floor, prefetch from "std/intrinsics.bpl";
 extern exit(code: int);
 extern puts(s: string) ret int;
 
-global HDR: long = 36;    # header size, format 2 (format 1: 28)
-global HDR1: long = 28;
+global HDR: long = 36;    # header size
 global BB_MIN: int = 12;       # table bits a stream may use (c/fm4.c BB_MIN, BB_DEC_MAX); the encoder writes <= 20
 global BB_DEC_MAX: int = 22;
 global CRC_T: *uint = nullptr;
@@ -2312,20 +2311,19 @@ frame fm4Encode(level: int, mode: int, width: long, data: *u8, L: long) ret long
     return bestLen;
 }
 
-# Decode; result in fm4Result(). Returns original length, or -1 for a bad container. Format 2: header CRC,
-# L bounded by the payload (~2840 bytes per payload byte at most), no read past the payload, CRC of the result;
-# format 1 (no CRCs, trailing zero bytes stripped): only a fixed cap on L. Same rules as c/fm4.c.
+# Decode; result in fm4Result(). Returns original length, or -1 for a bad container: header CRC, L bounded by
+# the payload (~2840 bytes per payload byte at most), no read past the payload, CRC of the result. Same rules
+# as c/fm4.c.
 @[c_export]
 frame fm4Decode(f: *u8, n: long) ret long {
     initTables();
     local ext: *u8 = EXT_OUT;
     local extCap: long = EXT_CAP;
     EXT_OUT = nullptr;
-    if (n < HDR1 || f[0] != cast<u8>(70) || f[1] != cast<u8>(77) || f[2] != cast<u8>(52) || f[3] < cast<u8>(1) || f[3] > cast<u8>(2)) {
+    if (n < HDR) {
         return -1;
     }
-    local v2: bool = f[3] == cast<u8>(2);
-    local hd: long = v2 ? HDR : HDR1;
+    local hd: long = HDR;
     local mode: int = cast<int>(f[4]);
     local bb: int = cast<int>(f[5]);
     local limit: int = cast<int>(f[6]);
@@ -2334,7 +2332,7 @@ frame fm4Decode(f: *u8, n: long) ret long {
     local width: long = cast<long>(get32(ptrAdd(f, 12)));
     local L: long = cast<long>(get32(ptrAdd(f, 16))) | (cast<long>(get32(ptrAdd(f, 20))) << 32);
     if (!fm4StreamOk(f, n, L)) {
-        return -1;   # format 2: header CRC and L bound
+        return -1;   # magic, header CRC and L bound
     }
     if (mode > 3 || (mode == 2 && (width & 65535) == 0) || (mode == 3 && (width < 1 || width > 8))) {
         return -1;
@@ -2375,7 +2373,7 @@ frame fm4Decode(f: *u8, n: long) ret long {
         G_DEC = true;
         G_BUF = ptrAdd(f, hd);
         G_LEN = n - hd;
-        G_END = v2 ? n - hd : 9223372036854775807;
+        G_END = n - hd;
         G_POS = 0;
         G_X1 = 0;
         G_X2 = cast<uint>(0xFFFFFFFF);
@@ -2393,7 +2391,7 @@ frame fm4Decode(f: *u8, n: long) ret long {
             e8e9(out, L, false);
         }
     }
-    if (v2 && crc32Of(out, L) != get32(ptrAdd(f, 28))) {
+    if (crc32Of(out, L) != get32(ptrAdd(f, 28))) {
         return -1;
     }
     RESULT = out;
@@ -2437,19 +2435,16 @@ frame fm4AllowAnyParams() {
     ANY_FEAT = true;
 }
 
-# Checks of one FM4 stream (m >= 28 bytes at s, decoded length L) that need no decoding: the fixed cap, and for
-# format 2 the header CRC and the L bound (stream_ok in c/fm4.c). fm4Decode starts with it; containers call it
-# for each stream before adding the lengths up and allocating.
+# Checks of one FM4 stream (m bytes at s, decoded length L) that need no decoding: magic and version, header
+# CRC and the L bound (stream_ok in c/fm4.c). fm4Decode starts with it; containers call it for each stream
+# before adding the lengths up and allocating.
 @[c_export]
 frame fm4StreamOk(s: *u8, m: long, L: long) ret bool {
     initTables();
-    if (L < 0 || L > 1099511627776) {
+    if (m < HDR || s[0] != cast<u8>(70) || s[1] != cast<u8>(77) || s[2] != cast<u8>(52) || s[3] != cast<u8>(2) || L < 0 || L > 1099511627776) {
         return false;
     }
-    if (s[3] != cast<u8>(2)) {
-        return true;
-    }
-    if (m < HDR || get32(ptrAdd(s, 32)) != crc32Of(s, 32)) {
+    if (get32(ptrAdd(s, 32)) != crc32Of(s, 32)) {
         return false;
     }
     return (s[4] == cast<u8>(0)) ? L <= m - HDR : L / 4096 <= m - HDR;

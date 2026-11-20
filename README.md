@@ -130,9 +130,9 @@ the output is the same.
 CRC-32 of the header and of the original data. A corrupt file is rejected, never decoded to wrong data: the
 header CRC and a bound of L to about 2840x the payload stop a bad length before anything is allocated
 (also for every stream of an archive or segmented video, before their lengths are added up),
-decoding stops once it reads past the payload, and the data CRC is checked at the end. Format 1 files still
-decode (without those checks). A new format version is introduced only when existing decoders could not
-read the files; decoders keep reading every earlier version.
+decoding stops once it reads past the payload, and the data CRC is checked at the end. Until a first release
+the format may still change without a new version being readable by old builds (format 1 is no longer read);
+from then on, a new version is introduced only when existing decoders could not read the files.
 Decoders accept only the parameter sets the encoder's levels write (feature bits, table size, counter
 limit, mixer rate) and whole pixels, frames or samples, since other combinations would index past the model's
 arrays; files from `FEAT`/`FEAT2`/`LR` experiments need `FM4_ANY_FEAT=1` to decode with `c/fm4` or `bpl/fm4`
