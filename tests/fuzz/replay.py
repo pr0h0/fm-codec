@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Differential check of c/fm4 against bpl/fm4 (which may be an ASan build); neither may crash.
-  replay.py C_BIN BPL_BIN DECODE_CORPUS       each file, repaired as in fuzz_decode.c, gets the same verdict
+  replay.py C_BIN BPL_BIN DECODE_CORPUS       each file (a stream or segments), repaired as in fuzz_decode.c, gets the same verdict
                                              (both reject, or both decode to the same bytes)
   replay.py --enc C_BIN BPL_BIN RT_CORPUS     each file, read as in fuzz_roundtrip.c, encodes to the same file"""
 import os, struct, subprocess, sys, tempfile, zlib
@@ -28,6 +28,17 @@ LEVELS = level_tables()
 
 def repair(d):  # mirrors LLVMFuzzerTestOneInput in fuzz_decode.c
     f = bytearray(d)
+    if f[0:3] != b"FMS": return bytes(repair_stream(f, 0))
+    f[3], pos, k = 1, 8, 0
+    while k < struct.unpack("<I", bytes(f[4:8]))[0] and len(f) - pos >= 8 + 36:
+        repair_stream(f, pos + 8)
+        m = struct.unpack("<Q", bytes(f[pos:pos + 8]))[0]
+        if m > len(f) - pos - 8: break
+        pos += 8 + m; k += 1
+    return bytes(f)
+
+def repair_stream(g, at):  # the 36 header bytes at g[at:]
+    f = memoryview(g)[at:at + 36]
     f[0:4] = b"FM4\x01"; f[5] = 12 + f[5] % 3
     if f[9] & 1:
         mode, level = f[4] & 3, 1 + f[8] % 5
@@ -38,7 +49,7 @@ def repair(d):  # mirrors LLVMFuzzerTestOneInput in fuzz_decode.c
         f[8:12] = struct.pack("<I", feat); f[24:28] = struct.pack("<I", feat2)
     f[16:24] = struct.pack("<Q", struct.unpack("<Q", bytes(f[16:24]))[0] & 0x3FF)
     f[32:36] = struct.pack("<I", zlib.crc32(bytes(f[:32])))
-    return bytes(f)
+    return g
 
 def rt_args(d):  # mirrors LLVMFuzzerTestOneInput in fuzz_roundtrip.c: CLI arguments and the data
     level, mode = d[0] % 6, 1 + d[1] % 3

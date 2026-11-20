@@ -1355,20 +1355,25 @@ static int dec_segments(uint8_t *f, int64_t n, int threads, Out *out) {   /* 0 o
     int64_t ns = get32(f + 4), all = 0, pos = 8;
     if (ns > (n - 8) / (8 + HDR)) return 1;   /* each segment takes at least 8 + HDR bytes */
     Job *jobs = xcalloc(ns ? ns : 1, sizeof(Job));
+    int r = 1;
     for (int64_t k = 0; k < ns; k++) {
-        if (n - pos < 8 + HDR) return 1;
+        if (n - pos < 8 + HDR) goto done;
         int64_t m = get64(f + pos), L = get64(f + pos + 8 + 16);
-        if (m > n - pos - 8 || !stream_ok(f + pos + 8, m, L) || all + L < all) return 1;
+        if (m > n - pos - 8 || !stream_ok(f + pos + 8, m, L) || all + L < all) goto done;
         jobs[k] = (Job){0, 0, 0, L, m, f + pos + 8, NULL, 0};
         all += L; pos += 8 + m;
     }
-    if (pos != n) return 1;
+    if (pos != n) goto done;
     /* the segments decode straight into the output file (lengths bounded by the input) */
     uint8_t *d = out_open(out, all), *o = d;
-    if (!d) return 1;
+    if (!d) goto done;
     for (int64_t k = 0; k < ns; k++) { jobs[k].out = o; o += jobs[k].L; }
-    int jr = run_jobs(jobs, ns, threads, 1), r = out_close(out, !jr);
-    return jr == 3 ? 3 : r;
+    int jr = run_jobs(jobs, ns, threads, 1);
+    r = out_close(out, !jr);
+    if (jr == 3) r = 3;
+done:
+    free(jobs);
+    return r;
 }
 static uint8_t *out_get(int64_t L, void *ctx) { return out_open(ctx, L); }
 static int ncpu(void) {
