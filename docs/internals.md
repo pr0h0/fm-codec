@@ -42,7 +42,8 @@ fallback when the coded output would be larger.
 
 All integers are little endian.
 
-**FM4 stream, format 1** (header 36 bytes):
+**FM4 stream, format 1** (header 36 bytes). Format 1 is frozen since v0.1.0: a change that existing
+decoders could not read gets a new version byte, and decoders keep reading format 1.
 
 ```
 "FM4\x01" | mode u8 | bb u8 | counter limit u8 | mixer rate u8 | feat u32 | width u32 | L u64

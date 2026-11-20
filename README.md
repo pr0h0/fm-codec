@@ -12,8 +12,9 @@ WebAssembly for browsers and Node.
 It compresses harder than xz, zstd and FLAC on the data it models, and it is much slower. See
 [Results](#results) and [Caveats](#caveats) before you pick it for anything.
 
-> **Status: pre-release.** The file format (format 1) may still change in ways that old builds can't
-> read. Don't use fm4 for files you need to keep until there is a tagged release.
+> **Status: v0.1.0, first release.** The file format, format 1, is frozen: files written by this release
+> stay readable by every future version. A later format change gets a new version number, and
+> decoders keep reading format 1.
 
 ## Contents
 
@@ -167,7 +168,6 @@ comparison: `tar | xz -9e` 404,800, `zstd -19` 443,387, `zip -9` 935,388.
   MB/s for zstd. Decoding is as slow as encoding: the decoder has to run the same model.
 - **Memory.** 24-630 MB per process depending on level, and each parallel segment or archive part is
   its own process. Archives use about 350-420 MB per process.
-- **Pre-release format.** Format 1 may still change in ways that old builds can't read.
 - **Raw media only.** The image, audio and video modes take raw RGB24 or 16-bit PCM, and you have to give
   the width, channel count or frame size. fm4 doesn't parse PNG, WAV or video containers except inside
   archives (WAV, BMP, PPM).
@@ -219,8 +219,9 @@ make fuzz                            # libFuzzer harnesses, FUZZ_SECONDS each (d
   later), clang and wasm-ld.
 - **Tests.** `tests/run.sh` round-trips every mode and level, checks that C, BPL native and wasm write
   identical files (testing whichever builds exist), covers archives, segments and corrupt input, and
-  compares output hashes against `tests/expected.txt`. A change to those hashes is a format change.
-  `UPDATE=1 tests/run.sh` rewrites the file.
+  compares output hashes against `tests/expected.txt`. `UPDATE=1 tests/run.sh` rewrites the file.
+  `tests/format1/` holds files written by v0.1.0: every build must decode them to the same bytes, in this
+  and every later version.
 - **Benchmarks.** `tools/make_testdata.sh` builds benchmark inputs from files on a Linux system into
   `testdata/` (not in git). `bench/archivers_bench.sh` and `bench/imgcodecs_bench.sh` run other tools
   on the same inputs.

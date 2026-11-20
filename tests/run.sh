@@ -71,6 +71,39 @@ if [ $nw = 1 ]; then node -e '
     catch (e) { process.exit(/not enough memory/.test(e.message) ? 0 : 1); }
   });' "$R/bpl" "$R/tests/large_bb/bb21.fm4" || bad "wasm: a bb=21 stream must fail with a clear out-of-memory error"; fi
 
+# ---- format 1 is frozen: files written by v0.1.0 (tests/format1) must decode to the same bytes ----
+F1=$R/tests/format1
+mkdir -p "$D/f1"; : > "$D/f1/wasm.list"
+# (stderr is shown only when a check fails: it carries the decoder's error or a sanitizer report)
+(cd "$D/f1" && $C x "$F1/archive.fma" x >/dev/null 2>"$D/f1/err") || { cat "$D/f1/err"; bad "format 1: C cannot extract tests/format1/archive.fma"; }
+# the whole tree must come out as v0.1.0 wrote it: no file or directory more or less, empty files included
+[ "$(cd "$D/f1/x" 2>/dev/null && find . | sort)" = "$(cat "$F1/archive.tree")" ] || bad "format 1: archive.fma extracts a different tree than tests/format1/archive.tree"
+while read -r h name; do
+    case $name in
+    archive.fma/*) [ -f "$D/f1/x/${name#archive.fma/}" ] && [ "$(hash "$D/f1/x/${name#archive.fma/}")" = "$h" ] \
+            || bad "format 1: archive.fma: ${name#archive.fma/} missing or different";;
+    *)  for bin in "$C" $( [ $nb = 1 ] && echo "$B" ); do
+            rm -f "$D/f1/out"
+            $bin dec "$F1/$name" "$D/f1/out" >/dev/null 2>"$D/f1/err" && [ "$(hash "$D/f1/out")" = "$h" ] \
+                || { cat "$D/f1/err"; bad "format 1: ${bin#$R/} does not decode tests/format1/$name to the v0.1.0 bytes"; }
+        done
+        echo "$F1/$name $h" >> "$D/f1/wasm.list";;
+    esac
+done < "$F1/SHA256SUMS"
+if [ $nw = 1 ]; then node -e '
+  const fs = require("fs"), crypto = require("crypto");
+  import(require("url").pathToFileURL(process.argv[1] + "/fm4wasm.mjs").href).then(async ({ createFm4 }) => {
+    const fm4 = await createFm4(fs.readFileSync(process.argv[1] + "/fm4.wasm"), { threads: 1 });
+    let bad = 0;
+    for (const line of fs.readFileSync(process.argv[2], "utf8").trim().split("\n")) {
+      const [file, h] = line.split(" ");
+      try { const d = await fm4.decode(new Uint8Array(fs.readFileSync(file)));
+            if (crypto.createHash("sha256").update(d).digest("hex") !== h) { console.log("differs: " + file); bad = 1; } }
+      catch (e) { console.log(file + ": " + e.message); bad = 1; }
+    }
+    process.exit(bad);
+  });' "$R/bpl" "$D/f1/wasm.list" || bad "format 1: wasm does not decode tests/format1 to the v0.1.0 bytes"; fi
+
 # ---- hostile files found by fuzzing (tests/fuzz): each must be rejected, without a crash ----
 # each must also pass the header checks (current magic and version, header CRC, length bound), or it would be rejected there
 # and no longer reach the check it was written for
