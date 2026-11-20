@@ -38,16 +38,7 @@ export async function loadFm4Wasm(source) {
   return {
     encode(data, { level = 3, mode = "bytes", width = 0, height = 0, channels = 1 } = {}) {
       const m = mode === "image" || mode === "video" ? 2 : mode === "audio" ? 3 : 1;
-      let w = width;
-      if (m === 2 && (!(width > 0) || width > 65535 || data.length % (3 * width))) throw new Error("bad width");
-      if (mode === "video") {
-        if (width > 65535 || !(height > 0) || height > 65535 || data.length % (3 * width * height)) throw new Error("video: bad frame size");
-        w = width + height * 65536;
-      }
-      if (m === 3) {
-        if (!(channels >= 1 && channels <= 8) || data.length % (2 * channels)) throw new Error("audio: need 1-8 channels and a whole number of 16-bit frames");
-        w = channels;
-      }
+      const w = widthField(data.length, mode, width, height, channels);
       const p = copyIn(data, m);
       const n = Number(x.fm4Encode(level, m, BigInt(w), p, BigInt(data.length)));
       return copyOut(n);
@@ -72,6 +63,21 @@ export async function loadFm4Wasm(source) {
 const CRC_T = Uint32Array.from({ length: 256 }, (_, i) => { let c = i; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
 const crc32 = (u8) => { let c = 0xFFFFFFFF; for (const b of u8) c = CRC_T[(c ^ b) & 255] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; };
 const HDR = 36;   // FM4 header size
+// the header's width field for this shape (as c/fm4.c main checks it): image width, video width | height << 16,
+// audio channels; throws for a shape the encoder can't take
+const widthField = (n, mode, width, height, channels) => {
+  if (mode === "image" || mode === "video") {
+    if (!(width > 0) || width > 65535 || n % (3 * width)) throw new Error("bad width");
+    if (mode === "image") return width;
+    if (!(height > 0) || height > 65535 || n % (3 * width * height)) throw new Error("video: bad frame size");
+    return width + height * 65536;
+  }
+  if (mode === "audio") {
+    if (!(channels >= 1 && channels <= 8) || n % (2 * channels)) throw new Error("audio: need 1-8 channels and a whole number of 16-bit frames");
+    return channels;
+  }
+  return 0;
+};
 // the unit a segment cut may not split (seg_unit in c/fm4.c)
 const segUnit = (mode, width, height, channels) =>
   mode === "video" ? 3 * width * height : mode === "image" ? 3 * width : mode === "audio" ? 2 * channels : 1;
