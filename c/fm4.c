@@ -10,8 +10,8 @@
  *   | feat u32 | width u32 | L u64 | feat2 u32 | CRC-32 of the data u32 | CRC-32 of header bytes 0-31 u32
  *   | payload (store: raw bytes; else the arithmetic coder's bytes, all of them)
  *   width: image width; audio: channels (1-8); video: width | frame height << 16.
- *   Until a first release, format 1 is the only format and may still change; after it, the version byte changes
- *   whenever an existing decoder could not read the new files.
+ *   Format 1 is frozen since v0.1.0: a change that existing decoders could not read gets a new version byte,
+ *   and decoders keep reading format 1.
  *
  * Feature bits 2 (feat2):
  *   1 mixer selection by hit count   2 4th mixer   4 text contexts   8 run inputs   16 OLS predictor

@@ -10,3 +10,6 @@ instructions: |
   host bpl/fm4wasm.mjs) must produce byte-identical files to it, so any model or format change must be
   mirrored in both. Decoders read untrusted input: they must never crash, hang or write out of bounds.
   testdata/ is gitignored (local corpora); tests must not depend on it.
+  Format 1 (FM4\x01, FMA\x01, FMS\x01) is frozen since v0.1.0: decoders must keep reading it, and the files in
+  tests/format1/ must never be regenerated or edited. A change existing decoders could not read needs a new
+  version byte, with format 1 still decoded.

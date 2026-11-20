@@ -1,0 +1,11 @@
+Format 1 is frozen (since v0.1.0). These files were written by v0.1.0 and must decode to the same bytes in
+every later version and every build (C, BPL native, wasm); tests/run.sh checks them against SHA256SUMS
+(hash of the decoded output). Never regenerate or edit them: a decoder that fails here broke format 1.
+
+  text.L.fm4       8000 bytes of tests/gen.py text.txt, bytes mode, levels 0-5 (0: stored)
+  x86.3.fm4        8000 bytes of x86.bin, level 3 (E8/E9 transform applied)
+  image.L.fm4      img_96.rgb, image mode, width 96, levels 1-5
+  audio.L.fm4      8000 bytes of audio_2.pcm, 2 channels, levels 1-5
+  video.L.fm4      4 frames of video_64x48.rgb, levels 1-5 (level 1 has no previous-frame model)
+  segmented.2.fm4  text.txt slice at level 2 with SEG_MB=0.002: an FMS file of 3 segments
+  archive.fma      fm4 a 2 of tree/ (notes.txt, sub/prog.bin, sub/empty); C only
