@@ -73,6 +73,9 @@ is the same for any thread count. Each segment costs its model's memory (60-630 
 158 s -> 62 s, decode 163 s -> 63 s. Video, 24 s 270x480 (280 MB raw): 4 segments, +3.0% size,
 590 s -> 150 s, decode 607 s -> 153 s; 3 min 320x180 (933 MB): 13 segments, +4.7%, 2011 s -> 469 s
 (4 cores, 8 threads). Smaller inputs stay one FM4 stream; `SEG_MB` sets the segment size.
+The model is compiled once per level and mode with its feature bits as constants (C, BPL native and wasm;
+same output): bytes level 1 is about 35% faster than one general copy, levels 2-5 10-16%, image levels
+1-3 35-40%. It makes `fm4.wasm` 355 KB (97 KB gzipped) instead of 62 KB.
 The native BPL build (`bpl/fm4`, same `-t N`) and the browser build (`createFm4()` below) write and read
 the same segmented files.
 

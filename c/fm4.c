@@ -230,7 +230,8 @@ static void ols_upd(Ols *o, double y) {
     }
     for (int j = n - 1; j >= 0; j--) { double v = z[j]; for (int t = j + 1; t < n; t++) v -= L[t][j] * o->w[t]; o->w[j] = v / L[j][j]; }
 }
-static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, uint32_t feat2, int64_t width, uint8_t *data, int64_t L) {
+/* the model; always inlined into run() below, which calls it with constant parameters per level */
+static inline __attribute__((always_inline)) void run_body(Coder *c, int mode, int bb, int limit, uint32_t feat, uint32_t feat2, int64_t width, uint8_t *data, int64_t L) {
     int img = mode == 2, aud = mode == 3, nchan = aud ? (int)width : 0;
     /* video = image mode with feat2 bit 256: width field = width | frame height << 16 */
     int fvid = img && (feat2 & 256); int64_t fh = fvid ? width >> 16 : 0; if (fvid) width &= 0xFFFF;
@@ -817,6 +818,19 @@ static int params_ok(int mode, uint32_t feat, uint32_t feat2, int64_t width, int
     for (int level = 1; level <= 5; level++)
         if (feat == LEVEL_FEAT(mode, level) && feat2 == LEVEL_FEAT2(mode, level) && (!video || level >= 2) && !(mode == 2 && !video && level >= 2 && (width >> 16))) return 1;
     return 0;
+}
+/* One copy of the model per level and mode, compiled with its feature bits as constants: the compiler drops
+   the unused features' code and branches (bytes level 1: ~30% faster; same output). Other parameter sets
+   (FEAT/FEAT2 experiments) run the general copy. The x86 bit (64) only tells the decoder to undo the transform. */
+static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, uint32_t feat2, int64_t width, uint8_t *data, int64_t L) {
+    uint32_t f = feat & ~64u;
+#define SPEC(m, lv, v) if (mode == m && f == LEVEL_FEAT(m, lv) && feat2 == (LEVEL_FEAT2(m, lv) | v)) { run_body(c, m, bb, limit, LEVEL_FEAT(m, lv), LEVEL_FEAT2(m, lv) | v, width, data, L); return; }
+    SPEC(1, 1, 0) SPEC(1, 2, 0) SPEC(1, 3, 0) SPEC(1, 4, 0) SPEC(1, 5, 0)
+    SPEC(2, 1, 0) SPEC(2, 2, 0) SPEC(2, 3, 0) SPEC(2, 4, 0) SPEC(2, 5, 0)
+    SPEC(2, 2, 256) SPEC(2, 3, 256) SPEC(2, 4, 256) SPEC(2, 5, 256)
+    SPEC(3, 1, 0) SPEC(3, 2, 0) SPEC(3, 3, 0) SPEC(3, 4, 0)   /* audio level 5 = level 4 */
+#undef SPEC
+    run_body(c, mode, bb, limit, feat, feat2, width, data, L);
 }
 #define ENC_CAP(L) ((L) + HDR)
 static int64_t BIG;

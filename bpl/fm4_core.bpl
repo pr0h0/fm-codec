@@ -719,8 +719,90 @@ frame arenaSize(mode: int, bb: int, feat: uint, feat2: uint, L: long, nchan: lon
 # small arrays that are kept in locals while the loop runs. The work is split into calls because
 # WebAssembly engines only switch a function to optimized code when it is entered again: one call
 # for the whole input would run in baseline code to the end.
-@[noinline, unchecked]
+# One copy of the model per level and mode, compiled with its feature bits as constants (run in c/fm4.c):
+# the unused features' code and branches drop out; same output. Other parameter sets (FEAT/FEAT2
+# experiments) run the general copy. The x86 bit (64) only tells the decoder to undo the transform.
+# Values: levelFeat / levelFeat2 (image levels 2-5 also with the video bit 256 in feat2; audio 5 = 4).
+@[noinline]
 frame runChunk(mode: int, bb: int, limit: int, feat: uint, feat2: uint, widthF: long, data: *u8, L: long, i0: long, i1: long) {
+    local f: uint = feat & ~cast<uint>(64);
+    if (mode == 1 && f == cast<uint>(2097157) && feat2 == cast<uint>(0)) {
+        runChunkBody(1, bb, limit, cast<uint>(2097157), cast<uint>(0), widthF, data, L, i0, i1);
+        return;
+    }
+    if (mode == 1 && f == cast<uint>(39) && feat2 == cast<uint>(1)) {
+        runChunkBody(1, bb, limit, cast<uint>(39), cast<uint>(1), widthF, data, L, i0, i1);
+        return;
+    }
+    if (mode == 1 && f == cast<uint>(491695) && feat2 == cast<uint>(5)) {
+        runChunkBody(1, bb, limit, cast<uint>(491695), cast<uint>(5), widthF, data, L, i0, i1);
+        return;
+    }
+    if (mode == 1 && f == cast<uint>(494015) && feat2 == cast<uint>(7)) {
+        runChunkBody(1, bb, limit, cast<uint>(494015), cast<uint>(7), widthF, data, L, i0, i1);
+        return;
+    }
+    if (mode == 1 && f == cast<uint>(494015) && feat2 == cast<uint>(15)) {
+        runChunkBody(1, bb, limit, cast<uint>(494015), cast<uint>(15), widthF, data, L, i0, i1);
+        return;
+    }
+    if (mode == 2 && f == cast<uint>(2097152) && feat2 == cast<uint>(0)) {
+        runChunkBody(2, bb, limit, cast<uint>(2097152), cast<uint>(0), widthF, data, L, i0, i1);
+        return;
+    }
+    if (mode == 2 && f == cast<uint>(1048576) && feat2 == cast<uint>(128)) {
+        runChunkBody(2, bb, limit, cast<uint>(1048576), cast<uint>(128), widthF, data, L, i0, i1);
+        return;
+    }
+    if (mode == 2 && f == cast<uint>(1048608) && feat2 == cast<uint>(192)) {
+        runChunkBody(2, bb, limit, cast<uint>(1048608), cast<uint>(192), widthF, data, L, i0, i1);
+        return;
+    }
+    if (mode == 2 && f == cast<uint>(1049376) && feat2 == cast<uint>(210)) {
+        runChunkBody(2, bb, limit, cast<uint>(1049376), cast<uint>(210), widthF, data, L, i0, i1);
+        return;
+    }
+    if (mode == 2 && f == cast<uint>(1049376) && feat2 == cast<uint>(242)) {
+        runChunkBody(2, bb, limit, cast<uint>(1049376), cast<uint>(242), widthF, data, L, i0, i1);
+        return;
+    }
+    if (mode == 2 && f == cast<uint>(1048576) && feat2 == cast<uint>(384)) {
+        runChunkBody(2, bb, limit, cast<uint>(1048576), cast<uint>(384), widthF, data, L, i0, i1);
+        return;
+    }
+    if (mode == 2 && f == cast<uint>(1048608) && feat2 == cast<uint>(448)) {
+        runChunkBody(2, bb, limit, cast<uint>(1048608), cast<uint>(448), widthF, data, L, i0, i1);
+        return;
+    }
+    if (mode == 2 && f == cast<uint>(1049376) && feat2 == cast<uint>(466)) {
+        runChunkBody(2, bb, limit, cast<uint>(1049376), cast<uint>(466), widthF, data, L, i0, i1);
+        return;
+    }
+    if (mode == 2 && f == cast<uint>(1049376) && feat2 == cast<uint>(498)) {
+        runChunkBody(2, bb, limit, cast<uint>(1049376), cast<uint>(498), widthF, data, L, i0, i1);
+        return;
+    }
+    if (mode == 3 && f == cast<uint>(0) && feat2 == cast<uint>(0)) {
+        runChunkBody(3, bb, limit, cast<uint>(0), cast<uint>(0), widthF, data, L, i0, i1);
+        return;
+    }
+    if (mode == 3 && f == cast<uint>(32) && feat2 == cast<uint>(0)) {
+        runChunkBody(3, bb, limit, cast<uint>(32), cast<uint>(0), widthF, data, L, i0, i1);
+        return;
+    }
+    if (mode == 3 && f == cast<uint>(288) && feat2 == cast<uint>(2)) {
+        runChunkBody(3, bb, limit, cast<uint>(288), cast<uint>(2), widthF, data, L, i0, i1);
+        return;
+    }
+    if (mode == 3 && f == cast<uint>(2336) && feat2 == cast<uint>(34)) {
+        runChunkBody(3, bb, limit, cast<uint>(2336), cast<uint>(34), widthF, data, L, i0, i1);
+        return;
+    }
+    runChunkBody(mode, bb, limit, feat, feat2, widthF, data, L, i0, i1);
+}
+
+@[always_inline, unchecked]
+frame runChunkBody(mode: int, bb: int, limit: int, feat: uint, feat2: uint, widthF: long, data: *u8, L: long, i0: long, i1: long) {
     local first: bool = i0 == 0;
     local img: bool = mode == 2;
     local aud: bool = mode == 3;
