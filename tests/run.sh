@@ -68,13 +68,6 @@ if [ $nw = 1 ]; then node -e '
     catch (e) { process.exit(/not enough memory/.test(e.message) ? 0 : 1); }
   });' "$R/bpl" "$R/tests/large_bb/bb21.fm4" || bad "wasm: a bb=21 stream must fail with a clear out-of-memory error"; fi
 
-# ---- format 1 files (written by the previous encoder) still decode ----
-for t in "text.fm4 text.txt" "img_96.fm4 img_96.rgb" "ff.fm4 ff.bin"; do
-    set -- $t
-    $C dec "$R/tests/v1/$1" "$D/d" && cmp -s "$D/d" "$D/in/$2" || bad "C format 1 decode $1"
-    if [ $nb = 1 ]; then $B dec "$R/tests/v1/$1" "$D/d" && cmp -s "$D/d" "$D/in/$2" || bad "BPL format 1 decode $1"; fi
-done
-
 # ---- hostile files found by fuzzing (tests/fuzz): each must be rejected, without a crash ----
 for h in "$R"/tests/hostile/*.fm4; do
     for bin in "$C" $( [ $nb = 1 ] && echo "$B" ); do
@@ -151,6 +144,33 @@ EOF
 done
 echo "corrupt inputs: $n runs"
 
+# ---- format 1 (version byte 1, header CRC valid) is rejected everywhere: single stream, segment, archive ----
+# AT = offset of the FM4 stream in the file (8 + 8 in a segmented file or an archive: magic, count, u64 length)
+for t in "text.txt.4.fm4 0" "s1 16" "a1.fma 16"; do
+    set -- $t
+    python3 -c "
+import sys, zlib, struct
+d = bytearray(open(sys.argv[1], 'rb').read()); at = int(sys.argv[3]); d[at + 3] = 1
+d[at + 32:at + 36] = struct.pack('<I', zlib.crc32(bytes(d[at:at + 32])))
+open(sys.argv[2], 'wb').write(d)" "$D/$1" "$D/v1_$1" "$2"
+    rm -rf "$D/v1x"; mkdir "$D/v1x"
+    for bin in "$C" $( [ $nb = 1 ] && echo "$B" ); do
+        if [ "$1" = a1.fma ]; then [ "$bin" = "$C" ] || continue; (cd "$D/v1x" && $bin x "$D/v1_$1" . >/dev/null 2>&1); rc=$?
+        else (cd "$D/v1x" && $bin dec "$D/v1_$1" out >/dev/null 2>&1); rc=$?; fi
+        [ $rc = 1 ] && [ -z "$(ls -A "$D/v1x")" ] || bad "$(basename "$bin"): a version-1 stream in $1 was accepted or left files (exit $rc)"
+    done
+done
+if [ $nw = 1 ]; then node -e '
+  const fs = require("fs");
+  import(require("url").pathToFileURL(process.argv[1] + "/fm4wasm.mjs").href).then(async ({ loadFm4Wasm, createFm4 }) => {
+    const fm4 = await loadFm4Wasm(fs.readFileSync(process.argv[1] + "/fm4.wasm"));
+    const pool = await createFm4(fs.readFileSync(process.argv[1] + "/fm4.wasm"));
+    let ok = 0;
+    try { fm4.decode(new Uint8Array(fs.readFileSync(process.argv[2]))); } catch (e) { ok += /not an FM4 file/.test(e.message); }
+    try { await pool.decode(new Uint8Array(fs.readFileSync(process.argv[3]))); } catch (e) { ok += /not an FM4 file/.test(e.message); }
+    process.exit(ok === 2 ? 0 : 1);
+  });' "$R/bpl" "$D/v1_text.txt.4.fm4" "$D/v1_s1" || bad "wasm: a version-1 stream was not rejected"; fi
+
 # ---- the file-backed paths (inputs mapped, output written in place, temporary files for big buffers) run
 # only from 64 MB; FM4_BIG=1 runs them on the small inputs: same files, and no temporary files left behind ----
 mkdir -p "$D/big" && cp "$D/in/text.txt" "$D/in/video_64x48.rgb" "$D/in/audio_2.pcm" "$D/in/random.bin" "$D/in/x86.bin" "$D/big/"
@@ -168,19 +188,6 @@ if [ $nb = 1 ]; then
         $B enc 4 bytes x86.bin eb.fm4 && cmp -s eb.fm4 e.fm4 && $B dec eb.fm4 e.out && cmp -s e.out x86.bin &&
         $B enc -t 2 4 video 64 48 video_64x48.rgb vb.fmv && cmp -s vb.fmv v.fmv && $B dec vb.fmv v.out && cmp -s v.out video_64x48.rgb &&
         ! $B dec a.fma badb.out >/dev/null 2>&1 && none_like badb.out* .fm4-* ./*.fm4-*) || bad "BPL file-backed paths (FM4_BIG=1)"
-fi
-
-# a format-1 header claiming a huge length is decoded into memory, never into a file it would fill: the
-# output file must not be created (the allocation fails or the decode is rejected)
-python3 -c "
-import struct, sys
-d = bytearray(open(sys.argv[1], 'rb').read()); d[16:24] = struct.pack('<Q', 1 << 39)
-open(sys.argv[2], 'wb').write(d)" "$R/tests/v1/text.fm4" "$D/big/v1huge.fm4"
-# (with vm.overcommit_memory=1 the allocation succeeds and decoding just runs: then a timeout is fine too; the
-# point is that no output file appears)
-if [ -n "$T" ]; then
-    (cd "$D/big" && FM4_BIG=1 ${T% *} 10 $C dec v1huge.fm4 huge.out >/dev/null 2>&1; rc=$?
-     { [ $rc -le 1 ] || [ $rc = 124 ] || [ $rc = 137 ]; } && none_like huge.out*) || bad "format-1 huge length went to a file"
 fi
 
 # ---- locked hashes ----

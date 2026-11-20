@@ -40,7 +40,7 @@ extern signal(sig: int, handler: Func<void>(int)) ret Func<void>(int);
 extern kill(pid: int, sig: int) ret int;
 extern getpid() ret int;
 
-global HDR_MAX: long = 36;   # 28-byte FM4 header + 8 (stream may exceed L by the header plus a little)
+global HDR_MAX: long = 36;   # the FM4 header: an encoded stream is at most L + HDR_MAX bytes
 global USAGE: string = "usage: fm4 enc LEVEL(0-5) bytes IN OUT | fm4 enc LEVEL image WIDTH IN OUT | fm4 enc LEVEL audio CHANNELS IN OUT | fm4 enc LEVEL video WIDTH HEIGHT IN OUT | fm4 dec IN OUT | fm4 enc|dec -t N ...\n";
 
 # Working memory for L input bytes on 2 MB huge pages where the system gives them (fewer TLB misses
@@ -139,8 +139,8 @@ frame mapIn(path: string, outLen: *long) ret *u8 {
 }
 
 # Output written in place: mapOut gives a mapping of a new temporary file next to path (mkstemp: no existing file
-# is touched) with its space reserved; finishOut renames it to path, or removes it on failure. Only for format-2
-# lengths, which are bounded by the input (see Out in c/fm4.c); format 1 decodes into memory.
+# is touched) with its space reserved; finishOut renames it to path, or removes it on failure. Only for lengths
+# that passed fm4StreamOk, which bounds them by the input (see Out in c/fm4.c).
 global OUT_TMP: string = "";
 global PENDING: bool = false;   # OUT_TMP exists and an interrupted run removes it (its full size is reserved)
 global IO_ERR: bool = false;   # an I/O error was already reported (not a corrupt file)
@@ -411,7 +411,7 @@ frame encVideoSegments(level: int, width: long, data: *u8, L: long, ns: long, th
 # Decodes straight into the file out. Returns 0, or 1 for a corrupt file.
 frame decVideoSegments(f: *u8, n: long, threads: long, out: string) ret int {
     local ns: long = get64(&f[4]) & 4294967295;
-    if (ns > (n - 8) / 36) {   # each segment takes at least 8 + 28 bytes
+    if (ns > (n - 8) / (8 + HDR_MAX)) {   # each segment takes at least 8 + HDR_MAX bytes
         return 1;
     }
     local ins: **u8 = cast<**u8>(xalloc(ns * 8 + 8));
@@ -420,18 +420,16 @@ frame decVideoSegments(f: *u8, n: long, threads: long, out: string) ret int {
     local outs: **u8 = cast<**u8>(xalloc(ns * 8 + 8));
     local all: long = 0;
     local pos: long = 8;
-    local v2: bool = true;
     loop (local k: long = 0; k < ns; k = k + 1) {
-        if (n - pos < 36) {
+        if (n - pos < 8 + HDR_MAX) {
             return 1;
         }
         local m: long = get64(&f[pos]);
         local sl: long = get64(&f[pos + 24]);
-        if (m < 28 || m > n - pos - 8 || !fm4StreamOk(&f[pos + 8], m, sl)) {
+        if (m > n - pos - 8 || !fm4StreamOk(&f[pos + 8], m, sl)) {
             return 1;
         }
         ins[k] = &f[pos + 8];
-        v2 = v2 && f[pos + 11] == cast<u8>(2);
         Ms[k] = m;
         Ls[k] = sl;
         all = all + sl;
@@ -440,8 +438,8 @@ frame decVideoSegments(f: *u8, n: long, threads: long, out: string) ret int {
     if (pos != n) {
         return 1;
     }
-    # format 2: straight into the output file; format 1 (lengths with no bound): memory, written at the end
-    local d: *u8 = v2 ? mapOut(out, all) : sharedAnon((all > 0) ? all : 1);
+    # straight into the output file (lengths bounded by the input)
+    local d: *u8 = mapOut(out, all);
     if (d == nullptr) {
         return 1;
     }
@@ -451,16 +449,6 @@ frame decVideoSegments(f: *u8, n: long, threads: long, out: string) ret int {
         o = o + Ls[k2];
     }
     local ok: bool = runJobs(ns, threads, true, 0, 0, 0, ins, Ms, Ls, outs) == 0;
-    if (!v2) {
-        if (!ok) {
-            return 1;
-        }
-        if (spit(out, d, all) != 0) {
-            IO_ERR = true;
-            return 1;
-        }
-        return 0;
-    }
     return finishOut(out, d, all, ok);
 }
 
@@ -570,36 +558,26 @@ frame main(argc: int, argv: *string) ret int {
             }
             return 0;
         }
-        if (n >= 28) {
-            # original length (low 32 bits), mode and table bits from the header
-            local hl: long = cast<long>(f[16]) | (cast<long>(f[17]) << 8) | (cast<long>(f[18]) << 16) | (cast<long>(f[19]) << 24);
-            hugeArenaN(fm4EstimateDecode(hl, cast<int>(f[4]), cast<int>(f[5])));
-        }
-        # a header that passes the checks gets its output written in place, into the output file
-        local out: *u8 = nullptr;
-        local hL: long = (n >= 28) ? get64(&f[16]) : -1;
-        if (n >= 36 && f[0] == cast<u8>(70) && f[1] == cast<u8>(77) && f[2] == cast<u8>(52) && f[3] == cast<u8>(2) && fm4StreamOk(f, n, hL)) {
-            out = mapOut(argv[3], hL);
-            if (out == nullptr) {
-                return 1;
-            }
-            fm4UseBuffer(out, hL);
-        }
-        local L: long = fm4Decode(f, n);
-        if (out != nullptr) {
-            if (finishOut(argv[3], out, hL, L == hL) != 0) {
-                if (!IO_ERR) {
-                    printf("not an FM4 file\n");
-                }
-                return 1;
-            }
-            return 0;
-        }
-        if (L < 0) {
+        local hL: long = (n >= HDR_MAX) ? get64(&f[16]) : -1;
+        if (n < HDR_MAX || !fm4StreamOk(f, n, hL)) {
             printf("not an FM4 file\n");
             return 1;
         }
-        return spit(argv[3], fm4Result(), L);
+        # the header passed its checks: size the tables from it, decode in place into the output file
+        hugeArenaN(fm4EstimateDecode(hL, cast<int>(f[4]), cast<int>(f[5])));
+        local out: *u8 = mapOut(argv[3], hL);
+        if (out == nullptr) {
+            return 1;
+        }
+        fm4UseBuffer(out, hL);
+        local L: long = fm4Decode(f, n);
+        if (finishOut(argv[3], out, hL, L == hL) != 0) {
+            if (!IO_ERR) {
+                printf("not an FM4 file\n");
+            }
+            return 1;
+        }
+        return 0;
     }
     printf("%s", USAGE);
     return 2;

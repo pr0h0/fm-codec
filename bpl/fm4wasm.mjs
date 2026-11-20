@@ -53,10 +53,9 @@ export async function loadFm4Wasm(source) {
       return copyOut(n);
     },
     decode(buf) {
-      // header checks first (magic, version, format-2 CRC, table bits) so a corrupt byte can't size memory
-      const L = buf.length >= 28 ? Number(new DataView(buf.buffer, buf.byteOffset).getBigUint64(16, true)) : 0;
-      const ok = buf.length >= 28 && buf[0] === 70 && buf[1] === 77 && buf[2] === 52 && (buf[3] === 1 || buf[3] === 2)
-        && streamOk(buf, L) && (buf[4] === 0 || (buf[5] >= 12 && buf[5] <= 22));
+      // header checks first (magic, version, header CRC, table bits) so a corrupt byte can't size memory
+      const L = buf.length >= 36 ? Number(new DataView(buf.buffer, buf.byteOffset).getBigUint64(16, true)) : 0;
+      const ok = streamOk(buf, L) && (buf[4] === 0 || (buf[5] >= 12 && buf[5] <= 22));
       if (!ok) throw new Error("not an FM4 file");
       const m = buf[4];
       ensure(Math.max(L, buf.length), m, buf[5]);   // a 64-bit L past the 2 GB the module handles is refused there
@@ -73,9 +72,8 @@ export async function loadFm4Wasm(source) {
 const CRC_T = Uint32Array.from({ length: 256 }, (_, i) => { let c = i; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
 const crc32 = (u8) => { let c = 0xFFFFFFFF; for (const b of u8) c = CRC_T[(c ^ b) & 255] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; };
 const streamOk = (s, L) => {
-  if (L > 2 ** 40) return false;
-  if (s[3] !== 2) return true;
-  if (s.length < 36 || new DataView(s.buffer, s.byteOffset).getUint32(32, true) !== crc32(s.subarray(0, 32))) return false;
+  if (s.length < 36 || s[0] !== 70 || s[1] !== 77 || s[2] !== 52 || s[3] !== 2 || L > 2 ** 40) return false;
+  if (new DataView(s.buffer, s.byteOffset).getUint32(32, true) !== crc32(s.subarray(0, 32))) return false;
   return s[4] === 0 ? L <= s.length - 36 : Math.floor(L / 4096) <= s.length - 36;
 };
 
@@ -151,9 +149,9 @@ export async function createFm4(source, { threads, workerUrl = new URL("./fm4wor
       const dv = new DataView(buf.buffer, buf.byteOffset, n), ns = dv.getUint32(4, true), segs = [];
       let pos = 8, all = 0;
       for (let k = 0; k < ns; k++) {
-        if (n - pos < 36) throw new Error("not an FM4 file, or corrupt");
+        if (n - pos < 44) throw new Error("not an FM4 file, or corrupt");
         const m = Number(dv.getBigUint64(pos, true)), L = Number(dv.getBigUint64(pos + 24, true));
-        if (m < 28 || m > n - pos - 8 || !streamOk(buf.subarray(pos + 8, pos + 8 + m), L)) throw new Error("not an FM4 file, or corrupt");
+        if (m > n - pos - 8 || !streamOk(buf.subarray(pos + 8, pos + 8 + m), L)) throw new Error("not an FM4 file, or corrupt");
         segs.push([pos + 8, m, L]); all += L; pos += 8 + m;
       }
       if (pos !== n) throw new Error("not an FM4 file, or corrupt");

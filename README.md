@@ -117,8 +117,7 @@ previous build was killed), and a 1.2 GB text file encodes at level 1 under 512 
 Disk: decoding reserves the output's size up front (Linux, and macOS in C), so a full disk is an error instead
 of a crash; the BPL build on macOS can only extend the file. Encoding needs free space of up to about twice the
 input (the reserved encoder buffer, plus an E8/E9 copy for executables) besides the output. When a temporary
-buffer can't be created, it falls back to memory. Format-1 files, whose header length has no bound, still decode
-into memory. Windows reads and writes files in memory.
+buffer can't be created, it falls back to memory. Windows reads and writes files in memory.
 
 **Platforms:** `c/fm4.c` builds on Linux, macOS and Windows (MinGW-w64, e.g. MSYS2 UCRT64:
 `make c/fm4 CC=gcc`); CI runs the test suite on Linux x86-64, macOS arm64 and Windows, and the locked output
@@ -130,9 +129,9 @@ the output is the same.
 CRC-32 of the header and of the original data. A corrupt file is rejected, never decoded to wrong data: the
 header CRC and a bound of L to about 2840x the payload stop a bad length before anything is allocated
 (also for every stream of an archive or segmented video, before their lengths are added up),
-decoding stops once it reads past the payload, and the data CRC is checked at the end. Format 1 files still
-decode (without those checks). A new format version is introduced only when existing decoders could not
-read the files; decoders keep reading every earlier version.
+decoding stops once it reads past the payload, and the data CRC is checked at the end. Until a first release
+the format may still change without a new version being readable by old builds (format 1 is no longer read);
+from then on, a new version is introduced only when existing decoders could not read the files.
 Decoders accept only the parameter sets the encoder's levels write (feature bits, table size, counter
 limit, mixer rate) and whole pixels, frames or samples, since other combinations would index past the model's
 arrays; files from `FEAT`/`FEAT2`/`LR` experiments need `FM4_ANY_FEAT=1` to decode with `c/fm4` or `bpl/fm4`
