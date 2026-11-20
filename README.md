@@ -65,11 +65,14 @@ const packed = fm2.encode(bytes, { level: 4, mode: "image", width: 2048 });
 fm4 adds to fm3: an online least-squares (OLS) pixel predictor, a 2-D match model and exact-colour
 contexts for images; four text contexts, a fourth mixer, mixer selection by context hit count and
 (level 5) per-context run inputs for text; a 16-bit mixer; and two new modes, **audio** (16-bit PCM)
-and **video** (raw RGB frames, uses the previous frame). Video of 128 MB raw or more is cut into
-size / 64 MB runs of whole frames, coded and decoded in parallel (container `FMV\x01`, see `c/fm4.c`);
-the cut depends only on the data, so the file is the same for any thread count. 24 s 270x480 short
-(280 MB raw): 4 segments, +3.0% size, 590 s -> 150 s, decode 607 s -> 153 s; 3 min 320x180 (933 MB):
-13 segments, +4.7%, 2011 s -> 469 s (4 cores, 8 threads). Smaller videos stay one FM4 stream.
+and **video** (raw RGB frames, uses the previous frame). Input of 128 MB or more, in any mode, is cut into
+size / 64 MB runs of whole units (bytes; image rows; video frames; audio samples of every channel), coded
+and decoded in parallel (container `FMS\x01`, see `c/fm4.c`); the cut depends only on the data, so the file
+is the same for any thread count. Each segment costs its model's memory (60-630 MB by level).
+256 MB of mixed data (a tar of text, code and binaries), bytes level 1: 4 segments, +1.9% size,
+158 s -> 62 s, decode 163 s -> 63 s. Video, 24 s 270x480 (280 MB raw): 4 segments, +3.0% size,
+590 s -> 150 s, decode 607 s -> 153 s; 3 min 320x180 (933 MB): 13 segments, +4.7%, 2011 s -> 469 s
+(4 cores, 8 threads). Smaller inputs stay one FM4 stream; `SEG_MB` sets the segment size.
 The native BPL build (`bpl/fm4`, same `-t N`) and the browser build (`createFm4()` below) write and read
 the same segmented files.
 
@@ -83,10 +86,10 @@ const back = await fm4.decode(packed);
 ```
 
 All coding runs in Web Workers (module workers: Chrome 91+, Firefox 114+, Safari 16.4+), so the page
-stays responsive; video segments are coded one per worker. Each worker typically needs 300-800 MB of
+stays responsive; segments are coded one per worker. Each worker typically needs 300-800 MB of
 wasm memory (about 500 MB for a 64 MB video segment), less for inputs under 64 KB (2 KB: about 80 MB),
 hence the default of at most 4. (Files from `BB=21`/`22` experiments need 2.3-4.5 GB and decode only natively.) Single streams run at about
-half the native speed; only segmented video runs in parallel. `bench/browser/fm4_browser.sh` checks the
+half the native speed; only segmented input (128 MB and more) runs in parallel. `bench/browser/fm4_browser.sh` checks the
 output against `c/fm4` in headless Chromium. `loadFm4Wasm()` is the synchronous single-instance API
 (Node, Bun, inside a worker).
 
@@ -99,7 +102,7 @@ c/fm4 enc 4 bytes in.txt out.fm4              # levels 0..5
 c/fm4 enc 4 image 2048 in.rgb out.fm4         # raw RGB24, width
 c/fm4 enc 4 audio 2 in.pcm out.fm4            # raw 16-bit little-endian PCM, channels
 c/fm4 enc 4 video 640 360 in.rgb out.fm4      # raw RGB24 frames, width height
-c/fm4 dec out.fm4 restored                    # -t N after enc/dec: processes for video segments (default: all cores)
+c/fm4 dec out.fm4 restored                    # -t N after enc/dec: processes for segments (default: all cores)
 c/fm4 a 4 out.fma dir file ...                # archive files and directories (C only)
 c/fm4 a -m bytes 4 out.fma dir                # same, without the audio/image models
 c/fm4 a -t 1 4 out.fma dir                    # one process (default: all cores); same file for any -t
@@ -128,7 +131,7 @@ the output is the same.
 **Integrity:** files are format 2 (`FM4\x02`, 36-byte header, described at the top of `c/fm4.c`) with a
 CRC-32 of the header and of the original data. A corrupt file is rejected, never decoded to wrong data: the
 header CRC and a bound of L to about 2840x the payload stop a bad length before anything is allocated
-(also for every stream of an archive or segmented video, before their lengths are added up),
+(also for every stream of an archive or segmented file, before their lengths are added up),
 decoding stops once it reads past the payload, and the data CRC is checked at the end. Until a first release
 the format may still change without a new version being readable by old builds (format 1 is no longer read);
 from then on, a new version is introduced only when existing decoders could not read the files.

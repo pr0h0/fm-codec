@@ -77,15 +77,15 @@ const streamOk = (s, L) => {
   return s[4] === 0 ? L <= s.length - 36 : Math.floor(L / 4096) <= s.length - 36;
 };
 
-// ---- browser API: Web Worker pool and segmented video (FMV, same format and cut as c/fm4.c) ----
+// ---- browser API: Web Worker pool and segments (FMS, same format and cut as c/fm4.c) ----
 //   const fm4 = await createFm4(new URL("fm4.wasm", import.meta.url), { threads: 4 });
 //   const packed = await fm4.encode(data, { level, mode, width, height, channels });   // Promise<Uint8Array>
 //   const data = await fm4.decode(packed);  fm4.terminate();
-// All coding runs in workers (bpl/fm4worker.mjs), so the page stays responsive. Video of at least
-// 2 x segMB (default 64 MB) is cut into L / segMB runs of whole frames ("FMV\x01" | u32 n | n x (u64 len |
-// FM4 stream)), coded one segment per worker; the file is the same for any thread count. Each worker
-// needs about 500 MB for a 64 MB video segment (600-800 MB for text). Without Worker (Node) it runs
-// inline, one segment after another.
+// All coding runs in workers (bpl/fm4worker.mjs), so the page stays responsive. Input of at least
+// 2 x segMB (default 64 MB) is cut into L / segMB runs of whole units (byte, image row, video frame, audio
+// sample of every channel: "FMS\x01" | u32 n | n x (u64 len | FM4 stream)), coded one segment per worker; the
+// file is the same for any thread count. Each worker needs about 500 MB for a 64 MB video segment (600-800 MB
+// for text). Without Worker (Node) it runs inline, one segment after another.
 export async function createFm4(source, { threads, workerUrl = new URL("./fm4worker.mjs", import.meta.url) } = {}) {
   if (typeof source === "string" || source instanceof URL) source = await fetch(source);
   const module = source instanceof WebAssembly.Module ? source
@@ -124,10 +124,11 @@ export async function createFm4(source, { threads, workerUrl = new URL("./fm4wor
 
   return {
     async encode(data, opts = {}) {
-      const { mode = "bytes", width = 0, height = 0, segMB = 64 } = opts;
-      const fb = 3 * width * height;
-      if (mode === "video" && fb > 0 && data.length % fb === 0) {
-        const L = data.length, nf = L / fb, seg = segMB * 1048576;
+      const { mode = "bytes", width = 0, height = 0, channels = 1, segMB = 64 } = opts;
+      // the unit a cut may not split (seg_unit in c/fm4.c); invalid shapes go unsegmented and fail in encode()
+      const fb = mode === "video" ? 3 * width * height : mode === "image" ? 3 * width : mode === "audio" ? 2 * channels : 1;
+      if (fb > 0 && data.length % fb === 0) {
+        const L = data.length, nf = L / fb, seg = Math.floor(segMB * 1048576);
         let ns = seg > 0 ? Math.floor(L / seg) : 1;
         ns = ns > nf ? Math.max(nf, 1) : Math.max(ns, 1);
         if (ns > 1) {
@@ -135,7 +136,7 @@ export async function createFm4(source, { threads, workerUrl = new URL("./fm4wor
             run("enc", own(data, Math.floor(nf * k / ns) * fb, Math.floor(nf * (k + 1) / ns) * fb), opts)));
           const out = new Uint8Array(8 + parts.reduce((t, p) => t + 8 + p.length, 0));
           const dv = new DataView(out.buffer);
-          out.set([70, 77, 86, 1]); dv.setUint32(4, ns, true);
+          out.set([70, 77, 83, 1]); dv.setUint32(4, ns, true);
           let pos = 8;
           for (const p of parts) { dv.setBigUint64(pos, BigInt(p.length), true); out.set(p, pos + 8); pos += 8 + p.length; }
           return out;
@@ -145,7 +146,7 @@ export async function createFm4(source, { threads, workerUrl = new URL("./fm4wor
     },
     async decode(buf) {
       const n = buf.length;
-      if (!(n >= 8 && buf[0] === 70 && buf[1] === 77 && buf[2] === 86 && buf[3] === 1)) return run("dec", own(buf));
+      if (!(n >= 8 && buf[0] === 70 && buf[1] === 77 && buf[2] === 83 && buf[3] === 1)) return run("dec", own(buf));
       const dv = new DataView(buf.buffer, buf.byteOffset, n), ns = dv.getUint32(4, true), segs = [];
       let pos = 8, all = 0;
       for (let k = 0; k < ns; k++) {

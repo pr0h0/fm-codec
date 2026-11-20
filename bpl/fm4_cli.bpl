@@ -1,6 +1,6 @@
 # fm4 native CLI (BPL):  fm4 enc LEVEL bytes IN OUT | fm4 enc LEVEL image WIDTH IN OUT |
 # fm4 enc LEVEL audio CHANNELS IN OUT | fm4 enc LEVEL video WIDTH HEIGHT IN OUT | fm4 dec IN OUT
-# fm4 enc|dec -t N ...: processes for segmented video (same FMV format and cut as c/fm4.c).
+# fm4 enc|dec -t N ...: processes for segments (same FMS format and cut as c/fm4.c).
 import printf, malloc, strcmp, atoi, snprintf from "std/c.bpl";
 import fm4Encode, fm4Decode, fm4Result, fm4Estimate, fm4EstimateDecode, fm4SetArena, xalloc, fm4StreamOk, fm4AllowAnyParams, fm4UseBuffer, fm4InputIsScratch, e8e9Detect from "./fm4_core.bpl";
 
@@ -299,9 +299,21 @@ frame sharedAnon(n: long) ret *u8 {
     return mapped(mmap(nullptr, n, 3, mapAnonShared(), -1, 0));
 }
 
-# Segmented video: "FMV\x01" | u32 nseg | nseg x (u64 length | FM4 stream), each stream a run of whole
-# frames. Inputs of at least 2 x SEG_MB (default 64 MB) are cut into L / SEG_MB runs; same rule as c/fm4.c.
-frame videoSegments(L: long, fbytes: long) ret long {
+# Segments (every mode): "FMS\x01" | u32 nseg | nseg x (u64 length | FM4 stream), each stream a run of whole
+# units (byte, image row, video frame, audio sample of every channel). Inputs of at least 2 x SEG_MB (default
+# 64 MB) are cut into L / SEG_MB runs; same rule as c/fm4.c.
+frame segUnit(mode: int, width: long) ret long {
+    if (mode == 2) {
+        local fh: long = width >> 16;
+        return 3 * (width & 65535) * ((fh != 0) ? fh : 1);
+    }
+    if (mode == 3) {
+        return 2 * width;
+    }
+    return 1;
+}
+
+frame segments(L: long, fbytes: long) ret long {
     local mb: double = 64.0;
     if (getenv("SEG_MB") != nullptr) {
         mb = atof(getenv("SEG_MB"));
@@ -365,8 +377,8 @@ frame runJobs(nj: long, threads: long, decode: bool, mode: int, level: int, widt
     return fail;
 }
 
-frame encVideoSegments(level: int, width: long, data: *u8, L: long, ns: long, threads: long, out: string) ret int {
-    local fbytes: long = 3 * (width & 65535) * (width >> 16);
+frame encSegments(level: int, mode: int, width: long, data: *u8, L: long, ns: long, threads: long, out: string) ret int {
+    local fbytes: long = segUnit(mode, width);
     local nf: long = L / fbytes;
     local ins: **u8 = cast<**u8>(xalloc(ns * 8));
     local Ls: *long = cast<*long>(xalloc(ns * 8));
@@ -382,7 +394,7 @@ frame encVideoSegments(level: int, width: long, data: *u8, L: long, ns: long, th
             return 1;
         }
     }
-    if (runJobs(ns, threads, false, 2, level, width, ins, Ls, Ls, outs) != 0) {
+    if (runJobs(ns, threads, false, mode, level, width, ins, Ls, Ls, outs) != 0) {
         printf("compression failed\n");
         return 1;
     }
@@ -394,7 +406,7 @@ frame encVideoSegments(level: int, width: long, data: *u8, L: long, ns: long, th
     local h: *u8 = cast<*u8>(xalloc(8));
     h[0] = cast<u8>(70);
     h[1] = cast<u8>(77);
-    h[2] = cast<u8>(86);
+    h[2] = cast<u8>(83);
     h[3] = cast<u8>(1);
     put64(&h[4], ns);
     fwrite(cast<*void>(h), 1, 8, f);
@@ -409,7 +421,7 @@ frame encVideoSegments(level: int, width: long, data: *u8, L: long, ns: long, th
 }
 
 # Decodes straight into the file out. Returns 0, or 1 for a corrupt file.
-frame decVideoSegments(f: *u8, n: long, threads: long, out: string) ret int {
+frame decSegments(f: *u8, n: long, threads: long, out: string) ret int {
     local ns: long = get64(&f[4]) & 4294967295;
     if (ns > (n - 8) / (8 + HDR_MAX)) {   # each segment takes at least 8 + HDR_MAX bytes
         return 1;
@@ -516,11 +528,9 @@ frame main(argc: int, argv: *string) ret int {
             printf("audio: need 1-8 channels and a whole number of 16-bit frames\n");
             return 1;
         }
-        if (video == 1) {
-            local ns: long = videoSegments(L, 3 * (width & 65535) * fheight);
-            if (ns > 1) {
-                return encVideoSegments(level, width, data, L, ns, threads, argv[ia + 1]);
-            }
+        local ns: long = segments(L, segUnit(mode, width));
+        if (ns > 1) {
+            return encSegments(level, mode, width, data, L, ns, threads, argv[ia + 1]);
         }
         hugeArena(L, mode);
         if (mode == 1 && L >= BIG && level >= 1 && e8e9Detect(data, L)) {
@@ -549,8 +559,8 @@ frame main(argc: int, argv: *string) ret int {
             return 1;
         }
         scratchDirFor(argv[3]);
-        if (n >= 8 && f[0] == cast<u8>(70) && f[1] == cast<u8>(77) && f[2] == cast<u8>(86) && f[3] == cast<u8>(1)) {
-            if (decVideoSegments(f, n, threads, argv[3]) != 0) {
+        if (n >= 8 && f[0] == cast<u8>(70) && f[1] == cast<u8>(77) && f[2] == cast<u8>(83) && f[3] == cast<u8>(1)) {
+            if (decSegments(f, n, threads, argv[3]) != 0) {
                 if (!IO_ERR) {
                     printf("not an FM4 file, or corrupt\n");
                 }

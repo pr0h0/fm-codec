@@ -89,17 +89,39 @@ for t in "backslash_path ..\\..\\escape.txt" "colon_path a:stream"; do
     esac
 done
 
-# ---- segmented video: same file for any thread count and build ----
+# ---- segments (every mode): same file for any thread count and build ----
 v=$D/in/video_64x48.rgb
 SEG_MB=0.05 $C enc -t 1 4 video 64 48 "$v" "$D/s1" && SEG_MB=0.05 $C enc -t 3 4 video 64 48 "$v" "$D/s3" || bad "C segmented enc"
 cmp -s "$D/s1" "$D/s3" || bad "segmented video depends on thread count"
-[ "$(head -c 4 "$D/s1")" = "$(printf 'FMV\001')" ] || bad "video not segmented"
+[ "$(head -c 4 "$D/s1")" = "$(printf 'FMS\001')" ] || bad "video not segmented"
 $C dec -t 2 "$D/s1" "$D/d" && cmp -s "$D/d" "$v" || bad "C segmented round trip"
 echo "video_64x48.rgb seg $(hash "$D/s1")" >> "$D/hashes"
 if [ $nb = 1 ]; then
     SEG_MB=0.05 $B enc -t 2 4 video 64 48 "$v" "$D/sb" && cmp -s "$D/sb" "$D/s1" || bad "BPL segmented output differs from C"
     $B dec "$D/s1" "$D/d" && cmp -s "$D/d" "$v" || bad "BPL segmented decode"
 fi
+# bytes, image (whole rows) and audio (whole frames): SEG_MB=0.005 cuts each test input into 3-9 segments
+for t in "text.txt 2 bytes" "x86.bin 3 bytes" "img_96.rgb 3 image 96" "audio_2.pcm 4 audio 2"; do
+    set -- $t; nm=$1; f=$D/in/$1; lv=$2; shift 2
+    SEG_MB=0.005 $C enc -t 1 $lv "$@" "$f" "$D/g1" && SEG_MB=0.005 $C enc -t 3 $lv "$@" "$f" "$D/g3" && cmp -s "$D/g1" "$D/g3" || bad "C segments $nm: thread count"
+    [ "$(head -c 4 "$D/g1")" = "$(printf 'FMS\001')" ] || bad "$nm not segmented"
+    $C dec "$D/g1" "$D/d" && cmp -s "$D/d" "$f" || bad "C segmented round trip $nm"
+    echo "$(basename "$f") seg $(hash "$D/g1")" >> "$D/hashes"
+    if [ $nb = 1 ]; then
+        SEG_MB=0.005 $B enc -t 2 $lv "$@" "$f" "$D/gb" && cmp -s "$D/gb" "$D/g1" || bad "BPL segments differ from C: $nm"
+        $B dec "$D/g1" "$D/d" && cmp -s "$D/d" "$f" || bad "BPL segmented decode $nm"
+    fi
+    if [ $nw = 1 ]; then node -e '
+      const fs = require("fs"), [dir, inp, ref, lv, mode, a] = process.argv.slice(1);
+      import(require("url").pathToFileURL(dir + "/fm4wasm.mjs").href).then(async ({ createFm4 }) => {
+        const fm4 = await createFm4(fs.readFileSync(dir + "/fm4.wasm"));
+        const data = new Uint8Array(fs.readFileSync(inp)), want = new Uint8Array(fs.readFileSync(ref));
+        const got = await fm4.encode(data, { level: +lv, mode, width: +a || 0, channels: +a || 1, segMB: 0.005 });
+        const back = await fm4.decode(want);
+        const eq = (x, y) => x.length === y.length && x.every((v, i) => v === y[i]);
+        process.exit(eq(got, want) && eq(back, data) ? 0 : 1);
+      });' "$R/bpl" "$f" "$D/g1" $lv "$@" || bad "wasm (createFm4) segments differ from C: $nm"; fi
+done
 
 # ---- archive ----
 mkdir -p "$D/tree/sub/deeper" "$D/tree/empty"
