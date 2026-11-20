@@ -230,7 +230,8 @@ static void ols_upd(Ols *o, double y) {
     }
     for (int j = n - 1; j >= 0; j--) { double v = z[j]; for (int t = j + 1; t < n; t++) v -= L[t][j] * o->w[t]; o->w[j] = v / L[j][j]; }
 }
-static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, uint32_t feat2, int64_t width, uint8_t *data, int64_t L) {
+/* the model; always inlined into run() below, which calls it with constant parameters per level */
+static inline __attribute__((always_inline)) void run_body(Coder *c, int mode, int bb, int limit, uint32_t feat, uint32_t feat2, int64_t width, uint8_t *data, int64_t L) {
     int img = mode == 2, aud = mode == 3, nchan = aud ? (int)width : 0;
     /* video = image mode with feat2 bit 256: width field = width | frame height << 16 */
     int fvid = img && (feat2 & 256); int64_t fh = fvid ? width >> 16 : 0; if (fvid) width &= 0xFFFF;
@@ -818,11 +819,35 @@ static int params_ok(int mode, uint32_t feat, uint32_t feat2, int64_t width, int
         if (feat == LEVEL_FEAT(mode, level) && feat2 == LEVEL_FEAT2(mode, level) && (!video || level >= 2) && !(mode == 2 && !video && level >= 2 && (width >> 16))) return 1;
     return 0;
 }
+/* One copy of the model per level and mode, compiled with its feature bits as constants: the compiler drops
+   the unused features' code and branches (bytes level 1: ~35% faster; same output). Other parameter sets
+   (FEAT/FEAT2 experiments) run the general copy. The x86 bit (64) only tells the decoder to undo the transform. */
+static int RAN_GENERAL;   /* the last encode / decode used the general copy (no level matched; see spec_missed) */
+static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, uint32_t feat2, int64_t width, uint8_t *data, int64_t L) {
+    uint32_t f = feat & ~64u;
+    RAN_GENERAL = 0;
+#define SPEC(m, lv, v) if (mode == m && f == LEVEL_FEAT(m, lv) && feat2 == (LEVEL_FEAT2(m, lv) | v)) { run_body(c, m, bb, limit, LEVEL_FEAT(m, lv), LEVEL_FEAT2(m, lv) | v, width, data, L); return; }
+    SPEC(1, 1, 0) SPEC(1, 2, 0) SPEC(1, 3, 0) SPEC(1, 4, 0) SPEC(1, 5, 0)
+    SPEC(2, 1, 0) SPEC(2, 2, 0) SPEC(2, 3, 0) SPEC(2, 4, 0) SPEC(2, 5, 0)
+    SPEC(2, 2, 256) SPEC(2, 3, 256) SPEC(2, 4, 256) SPEC(2, 5, 256)
+    SPEC(3, 1, 0) SPEC(3, 2, 0) SPEC(3, 3, 0) SPEC(3, 4, 0)   /* audio level 5 = level 4 */
+#undef SPEC
+    RAN_GENERAL = 1;
+    run_body(c, mode, bb, limit, feat, feat2, width, data, L);
+}
+/* FM4_CHECK_SPEC=1 (tests/run.sh): a level that ran the general copy is an error (exit 3). It still codes the
+   same bytes, only slower, so without this check a level missing from run()'s list would go unnoticed. */
+static int spec_missed(void) {
+    if (!getenv("FM4_CHECK_SPEC") || !RAN_GENERAL) return 0;
+    fputs("fm4: this level ran the general model copy: run()'s level list does not cover it\n", stderr);
+    return 1;
+}
 #define ENC_CAP(L) ((L) + HDR)
 static int64_t BIG;
 static uint8_t *scratch(int64_t n);
 static void scratch_free(void *p, int64_t n);
 static uint8_t *fm4_encode(int level, int mode, int64_t width, uint8_t *data, int64_t L, int64_t *outLen) {
+    RAN_GENERAL = 0;   /* per call (a stored stream never reaches run()) */
     uint32_t feat = LEVEL_FEAT(mode, level), feat2 = LEVEL_FEAT2(mode, level);
     int bb = level == 5 && mode == 1 ? 19 : 18, limit = 255;
     /* short inputs get small tables: 2^(bb-2) >= L (16 buckets each; larger tables would stay mostly empty).
@@ -871,6 +896,7 @@ static int stream_ok(const uint8_t *s, int64_t m, int64_t L) {
 }
 /* get(L, ctx) supplies the output buffer once L is known and checked (NULL: malloc); NULL result: corrupt */
 static uint8_t *fm4_decode_to(uint8_t *f, int64_t n, int64_t *outLen, uint8_t *(*get)(int64_t, void *), void *ctx) {
+    RAN_GENERAL = 0;   /* per call (a stored stream never reaches run()) */
     if (n < HDR) return NULL;
     int hd = HDR, mode = f[4], bb = f[5], limit = f[6]; uint32_t feat = get32(f + 8), feat2 = get32(f + 24);
     int64_t width = get32(f + 12), L = get64(f + 16);
@@ -1167,13 +1193,15 @@ static void detect(Ent *e, int media) {
 /* Streams are independent, so they are coded in parallel, one forked process each, results in shared memory. */
 typedef struct { int mode, level; int64_t width, L, n; uint8_t *in, *out; long pid; } Job;
 static uint8_t *job_out(int64_t L, void *j) { return L == ((Job *)j)->L ? ((Job *)j)->out : NULL; }   /* decode in place */
-static int do_job(Job *j, int decode) {   /* 0 on success */
+static int do_job(Job *j, int decode) {   /* 0 on success, 3: spec_missed, 1: failed */
     int64_t m;
-    if (decode) return !fm4_decode_to(j->in, j->n, &m, job_out, j);
+    if (decode) { int bad = !fm4_decode_to(j->in, j->n, &m, job_out, j); return bad ? 1 : spec_missed() ? 3 : 0; }
     uint8_t *o = fm4_encode(j->level, j->mode, j->width, j->in, j->L, &m);
     put64(j->out, m); memcpy(j->out + 8, o, m); scratch_free(o, ENC_CAP(j->L));
-    return 0;
+    return spec_missed() ? 3 : 0;
 }
+/* a job's status into the total: 3 only while every failure was a spec miss, else 1 */
+static int job_fail(int fail, int r) { return !r ? fail : r == 3 && fail != 1 ? 3 : 1; }
 static int run_jobs(Job *jobs, int nj, int threads, int decode) {
     int fail = 0;
     if (!decode) {   /* out: u64 length | stream (at most L + HDR bytes), all in one shared buffer; decode: the caller's */
@@ -1184,7 +1212,7 @@ static int run_jobs(Job *jobs, int nj, int threads, int decode) {
     }
 #ifdef NO_FORK
     (void)threads;
-    for (int i = 0; i < nj; i++) fail |= do_job(&jobs[i], decode);
+    for (int i = 0; i < nj; i++) fail = job_fail(fail, do_job(&jobs[i], decode));
 #else
     int next = 0, running = 0, st;
     while (next < nj || running) {
@@ -1194,7 +1222,7 @@ static int run_jobs(Job *jobs, int nj, int threads, int decode) {
             if ((j->pid = fork()) < 0) { perror("fork"); return 1; }
             if (!j->pid) _exit(do_job(j, decode));
             running++;
-        } else { if (wait(&st) < 0 || !WIFEXITED(st) || WEXITSTATUS(st)) fail = 1; running--; }
+        } else { fail = job_fail(fail, wait(&st) < 0 || !WIFEXITED(st) ? 1 : WEXITSTATUS(st)); running--; }
     }
 #endif
     return fail;
@@ -1226,7 +1254,8 @@ static int archive(int level, int media, int threads, const char *out, char **pa
     Job *jobs = xcalloc(nsolid + nown, sizeof(Job));
     for (int k = 0; k < nsolid; k++) { int64_t lo = n * k / nsolid, hi = n * (k + 1) / nsolid; jobs[nj++] = (Job){1, level, 0, hi - lo, 0, s + lo, NULL, 0}; }
     for (int i = 0; i < nents; i++) { Ent *e = &ents[i]; if (e->b) jobs[nj++] = (Job){e->mode, e->mode ? level : 0, e->width, e->b, 0, e->d + e->a, NULL, 0}; }
-    if (run_jobs(jobs, nj, threads, 0)) { fprintf(stderr, "compression failed\n"); return 1; }
+    int jr = run_jobs(jobs, nj, threads, 0);
+    if (jr) { if (jr == 1) fprintf(stderr, "compression failed\n"); return jr; }
     FILE *f = fopen(out, "wb"); if (!f) { perror(out); return 1; }
     int64_t written = 8, k = nsolid; uint8_t n4[4] = {nsolid, nsolid >> 8, nsolid >> 16, nsolid >> 24};
     fwrite("FMA\x02", 1, 4, f); fwrite(n4, 1, 4, f);
@@ -1255,7 +1284,9 @@ static int extract(const char *in, const char *dir, int threads) {
     uint8_t *s = shared_alloc(all), *o = s;   /* every decoded stream (file-backed when large) */
     if (!s) goto bad;
     for (int64_t i = 0; i < nj; i++) { jobs[i].out = o; o += jobs[i].L; }
-    if (run_jobs(jobs, nj, threads, 1)) goto bad;
+    int jr = run_jobs(jobs, nj, threads, 1);
+    if (jr == 3) return 3;
+    if (jr) goto bad;
     int64_t count = get32(s), ip = 4, total = 0, k = nsolid;
     for (int64_t i = 0; i < count; i++) {   /* first pass over the index: find where the data starts */
         if (sn - ip < 2 || sn - ip < 30 + rd16(s + ip)) goto bad;
@@ -1311,7 +1342,8 @@ static int enc_segments(int level, int mode, int64_t width, uint8_t *data, int64
         int64_t a = nu * k / ns * unit, b = nu * (k + 1) / ns * unit;
         jobs[k] = (Job){mode, level, width, b - a, 0, data + a, NULL, 0};
     }
-    if (run_jobs(jobs, ns, threads, 0)) { fprintf(stderr, "compression failed\n"); return 1; }
+    int jr = run_jobs(jobs, ns, threads, 0);
+    if (jr) { if (jr == 1) fprintf(stderr, "compression failed\n"); return jr; }
     FILE *f = fopen(out, "wb"); if (!f) { perror(out); return 1; }
     uint8_t h[8] = {'F', 'M', 'S', 1}; for (int i = 0; i < 4; i++) h[4 + i] = (uint64_t)ns >> (8 * i);
     fwrite(h, 1, 8, f);
@@ -1335,7 +1367,8 @@ static int dec_segments(uint8_t *f, int64_t n, int threads, Out *out) {   /* 0 o
     uint8_t *d = out_open(out, all), *o = d;
     if (!d) return 1;
     for (int64_t k = 0; k < ns; k++) { jobs[k].out = o; o += jobs[k].L; }
-    return out_close(out, !run_jobs(jobs, ns, threads, 1));
+    int jr = run_jobs(jobs, ns, threads, 1), r = out_close(out, !jr);
+    return jr == 3 ? 3 : r;
 }
 static uint8_t *out_get(int64_t L, void *ctx) { return out_open(ctx, L); }
 static int ncpu(void) {
@@ -1386,6 +1419,7 @@ int main(int argc, char **argv) {
         int64_t ns = segments(L, seg_unit(mode, width));
         if (ns > 1) return enc_segments(level, mode, width, data, L, ns, threads, argv[(mode >= 2 ? 6 : 5) + video]);
         uint8_t *o = fm4_encode(level, mode, width, data, L, &n);
+        if (spec_missed()) { scratch_free(o, ENC_CAP(L)); return 3; }
         int r = spit(argv[(mode >= 2 ? 6 : 5) + video], o, n);
         scratch_free(o, ENC_CAP(L)); return r;
     }
@@ -1397,8 +1431,10 @@ int main(int argc, char **argv) {
         if (n >= 8 && !memcmp(f, "FMS\x01", 4)) bad = dec_segments(f, n, threads, &o);
         else {   /* decode straight into the output file */
             uint8_t *d = fm4_decode_to(f, n, &L, out_get, &o);
+            if (d && spec_missed()) { out_close(&o, 0); return 3; }
             bad = o.p ? out_close(&o, d != NULL) : 1;
         }
+        if (bad == 3) return 3;   /* a segment's spec_missed (reported) */
         if (bad && !o.ioerr) fprintf(stderr, "not an FM4 file, or corrupt\n");   /* (I/O errors were reported) */
         return bad;
     }

@@ -8,6 +8,9 @@ set -u
 # impossible allocation returns NULL as plain malloc does (the code then exits with "out of memory")
 export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0}:exitcode=99:allocator_may_return_null=1" UBSAN_OPTIONS="${UBSAN_OPTIONS:-print_stacktrace=1}:exitcode=99" MSAN_OPTIONS="${MSAN_OPTIONS:-}:exitcode=99:allocator_may_return_null=1"
 R=$(cd "$(dirname "$0")/.." && pwd)
+# every level must run its specialized model copy: a level that ran the general one exits 3 (it would code the
+# same bytes, only slower; see run() in c/fm4.c and runChunk in bpl/fm4_core.bpl)
+export FM4_CHECK_SPEC=1
 C=${FM4:-$R/c/fm4}
 B=$R/bpl/fm4
 D=$(mktemp -d)
@@ -124,7 +127,8 @@ for t in "text.txt 2 bytes" "x86.bin 3 bytes" "img_96.rgb 3 image 96" "audio_2.p
 done
 
 # createFm4 without workers (Node) runs calls one at a time; a corrupt segmented file must reject without
-# breaking the calls queued next to it, and a call after the failure must load a fresh instance and succeed
+# breaking the calls queued next to it, and a later call must still succeed (whether that call got a fresh
+# instance is not observable from here)
 if [ $nw = 1 ]; then
     SEG_MB=0.005 $C enc 3 bytes "$D/in/text.txt" "$D/inl.fms" || bad "C enc for the inline-pool check"
     node -e '

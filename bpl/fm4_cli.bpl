@@ -2,7 +2,7 @@
 # fm4 enc LEVEL audio CHANNELS IN OUT | fm4 enc LEVEL video WIDTH HEIGHT IN OUT | fm4 dec IN OUT
 # fm4 enc|dec -t N ...: processes for segments (same FMS format and cut as c/fm4.c).
 import printf, malloc, strcmp, atoi, snprintf from "std/c.bpl";
-import fm4Encode, fm4Decode, fm4Result, fm4Estimate, fm4EstimateDecode, fm4SetArena, xalloc, fm4StreamOk, fm4AllowAnyParams, fm4UseBuffer, fm4InputIsScratch, e8e9Detect from "./fm4_core.bpl";
+import fm4Encode, fm4Decode, fm4Result, fm4Estimate, fm4EstimateDecode, fm4SetArena, xalloc, fm4StreamOk, fm4AllowAnyParams, fm4UseBuffer, fm4InputIsScratch, e8e9Detect, fm4RanGeneral from "./fm4_core.bpl";
 
 extern fopen(path: string, mode: string) ret *void;
 extern fread(buffer: *void, size: long, count: long, stream: *void) ret long;
@@ -331,7 +331,8 @@ frame segments(L: long, unit: long) ret long {
 }
 
 # One forked process per job, at most `threads` at once. Encode: in/L -> out = u64 length | stream
-# (out holds 8 + L + HDR bytes). Decode: in/n -> out, exactly L bytes. Returns 0 when every job succeeded.
+# (out holds 8 + L + HDR bytes). Decode: in/n -> out, exactly L bytes. Returns 0 when every job succeeded, 3 when
+# the only failures were FM4_CHECK_SPEC misses (specMissed, reported by the worker), else 1.
 frame runJobs(nj: long, threads: long, decode: bool, mode: int, level: int, width: long, ins: **u8, ns: *long, Ls: *long, outs: **u8) ret int {
     local next: long = 0;
     local running: long = 0;
@@ -355,12 +356,14 @@ frame runJobs(nj: long, threads: long, decode: bool, mode: int, level: int, widt
                     if (m != Ls[j]) {
                         _exit(1);
                     }
+                    exitIfSpecMissed();
                     if (fm4Result() != outs[j]) {
                         memcpy(cast<*void>(outs[j]), cast<*void>(fm4Result()), m);
                     }
                 } else {
                     local m2: long = encodeTo(level, mode, width, ins[j], Ls[j], &outs[j][8]);   # straight into the shared output
                     put64(outs[j], m2);
+                    exitIfSpecMissed();
                     if (fm4Result() != &outs[j][8]) {
                         memcpy(cast<*void>(&outs[j][8]), cast<*void>(fm4Result()), m2);
                     }
@@ -369,8 +372,15 @@ frame runJobs(nj: long, threads: long, decode: bool, mode: int, level: int, widt
             }
             running = running + 1;
         } else {
-            if (wait(&st) < 0 || st != 0) {
+            if (wait(&st) < 0) {
                 fail = 1;
+            } else if (st != 0) {
+                # status: exit code in bits 8-15, a signal in bits 0-6 (WEXITSTATUS / WTERMSIG)
+                if ((st & 127) != 0 || ((st >> 8) & 255) != 3) {
+                    fail = 1;
+                } else if (fail == 0) {
+                    fail = 3;   # only workers' specMissed() (exit 3, FM4_CHECK_SPEC); any other failure wins
+                }
             }
             running = running - 1;
         }
@@ -398,6 +408,24 @@ frame encodeTo(level: int, mode: int, width: long, data0: *u8, L: long, out: *u8
     return fm4Encode(level, mode, width, data, L);
 }
 
+# FM4_CHECK_SPEC=1: true (with a message) when the model ran its general copy, i.e. runChunk's list of levels
+# no longer matches levelFeat / levelFeat2 (the output is the same; only the speed would be lost)
+frame specMissed() ret bool {
+    if (getenv("FM4_CHECK_SPEC") != nullptr && fm4RanGeneral()) {
+        printf("fm4: this level ran the general model copy: runChunk's level list does not match levelFeat\n");
+        return true;
+    }
+    return false;
+}
+
+# a worker's FM4_CHECK_SPEC miss: exit 3 (runJobs passes it on); stdout is flushed first, as _exit skips it
+frame exitIfSpecMissed() {
+    if (specMissed()) {
+        fflush(nullptr);
+        _exit(3);
+    }
+}
+
 frame encSegments(level: int, mode: int, width: long, data: *u8, L: long, ns: long, threads: long, out: string) ret int {
     local unit: long = segUnit(mode, width);
     local nu: long = L / unit;
@@ -415,7 +443,11 @@ frame encSegments(level: int, mode: int, width: long, data: *u8, L: long, ns: lo
             return 1;
         }
     }
-    if (runJobs(ns, threads, false, mode, level, width, ins, Ls, Ls, outs) != 0) {
+    local jr: int = runJobs(ns, threads, false, mode, level, width, ins, Ls, Ls, outs);
+    if (jr == 3) {
+        return 3;   # FM4_CHECK_SPEC: reported by the worker
+    }
+    if (jr != 0) {
         printf("compression failed\n");
         return 1;
     }
@@ -441,7 +473,7 @@ frame encSegments(level: int, mode: int, width: long, data: *u8, L: long, ns: lo
     return 0;
 }
 
-# Decodes straight into the file out. Returns 0, or 1 for a corrupt file.
+# Decodes straight into the file out. Returns 0, 1 for a corrupt file, or 3 for an FM4_CHECK_SPEC miss.
 frame decSegments(f: *u8, n: long, threads: long, out: string) ret int {
     local ns: long = get64(&f[4]) & 4294967295;
     if (ns > (n - 8) / (8 + HDR)) {   # each segment takes at least 8 + HDR bytes
@@ -481,8 +513,12 @@ frame decSegments(f: *u8, n: long, threads: long, out: string) ret int {
         outs[k2] = &d[o];
         o = o + Ls[k2];
     }
-    local ok: bool = runJobs(ns, threads, true, 0, 0, 0, ins, Ms, Ls, outs) == 0;
-    return finishOut(out, d, all, ok);
+    local jr: int = runJobs(ns, threads, true, 0, 0, 0, ins, Ms, Ls, outs);
+    if (jr == 3) {
+        finishOut(out, d, all, false);
+        return 3;   # FM4_CHECK_SPEC: reported by the worker
+    }
+    return finishOut(out, d, all, jr == 0);
 }
 
 frame main(argc: int, argv: *string) ret int {
@@ -558,6 +594,9 @@ frame main(argc: int, argv: *string) ret int {
             eb = mapTemp(L + HDR);   # the result (at most L + HDR bytes) in a temporary file
         }
         local n: long = encodeTo(level, mode, width, data, L, eb);
+        if (specMissed()) {
+            return 3;
+        }
         return spit(argv[ia + 1], fm4Result(), n);
     }
     if (argc == 4 && strcmp(argv[1], "dec") == 0) {
@@ -568,7 +607,11 @@ frame main(argc: int, argv: *string) ret int {
         }
         scratchDirFor(argv[3]);
         if (n >= 8 && f[0] == cast<u8>(70) && f[1] == cast<u8>(77) && f[2] == cast<u8>(83) && f[3] == cast<u8>(1)) {
-            if (decSegments(f, n, threads, argv[3]) != 0) {
+            local dr: int = decSegments(f, n, threads, argv[3]);
+            if (dr == 3) {
+                return 3;
+            }
+            if (dr != 0) {
                 if (!IO_ERR) {
                     printf("not an FM4 file, or corrupt\n");
                 }
@@ -589,6 +632,10 @@ frame main(argc: int, argv: *string) ret int {
         }
         fm4UseBuffer(out, hL);
         local L: long = fm4Decode(f, n);
+        if (specMissed()) {
+            finishOut(argv[3], out, hL, false);
+            return 3;
+        }
         if (finishOut(argv[3], out, hL, L == hL) != 0) {
             if (!IO_ERR) {
                 printf("not an FM4 file\n");

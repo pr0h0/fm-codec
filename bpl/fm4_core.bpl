@@ -2,9 +2,10 @@
 # Shared by the native CLI (fm4_cli.bpl) and the WebAssembly build (fm4_wasm.bpl).
 # All working memory comes from reusable global buffers: wasm32 freestanding malloc is a bump
 # allocator whose free() is a no-op, so repeated encode/decode calls must not allocate afresh.
-# The model loop is runChunk(); run() calls it for 16 KB of input at a time (see runChunk).
-# Helpers are @[unchecked] leaf functions (no index/null checks, no stack guard); runChunk itself keeps
-# its checks, as it also decodes untrusted input.
+# The model loop is runChunkBody(); run() calls runChunk() for 16 KB of input at a time, which runs the body's
+# copy for the stream's level (see runChunk). The body and the helpers are @[unchecked] (no index/null checks,
+# no stack guard): untrusted input is safe because decoders accept only the level parameter sets (paramsOk),
+# whose indexing stays in bounds, and the libFuzzer harnesses check this on C (same model).
 # The OLS predictor is floating point: every expression keeps the exact operation order of
 # ols_pred / ols_upd in c/fm4.c (no fused multiply-add, no reordering); sqrt and floor are the
 # LLVM intrinsics (sqrtsd / f64.sqrt), which are correctly rounded like libm's.
@@ -60,6 +61,7 @@ global DB: *u8 = nullptr;
 global DB_CAP: long = 0;
 global EXT_OUT: *u8 = nullptr;   # fm4UseBuffer(): the next result goes here instead of OB0 / DB
 global EXT_CAP: long = 0;
+global RAN_GENERAL: bool = false;   # the last fm4Encode / fm4Decode ran the general model copy (no specialized level matched)
 global IN_SCRATCH: bool = false;   # fm4InputIsScratch(): the next fm4Encode need not restore its input
 global IB: *u8 = nullptr;
 global IB_CAP: long = 0;
@@ -713,14 +715,108 @@ frame arenaSize(mode: int, bb: int, feat: uint, feat2: uint, L: long, nchan: lon
     return total;
 }
 
+# the last fm4Encode / fm4Decode ran the general model copy (FM4_CHECK_SPEC in the CLI; see runChunk)
+@[c_export]
+frame fm4RanGeneral() ret bool {
+    return RAN_GENERAL;
+}
+
 # ---- model ----
 # Codes bytes [i0, i1) of data. The first call (i0 == 0) builds the model in the arena; later calls
 # find the same blocks again (the arena is taken in the same order) and reload the few scalars and
 # small arrays that are kept in locals while the loop runs. The work is split into calls because
 # WebAssembly engines only switch a function to optimized code when it is entered again: one call
 # for the whole input would run in baseline code to the end.
-@[noinline, unchecked]
+#
+# One copy of the model per level and mode, compiled with its feature bits as constants (run in c/fm4.c):
+# the unused features' code and branches drop out; same output. Other parameter sets (FEAT/FEAT2
+# experiments) run the general copy. The x86 bit (64) only tells the decoder to undo the transform.
+# Values: levelFeat / levelFeat2 (image levels 2-5 also with the video bit 256 in feat2; audio 5 = 4); they must
+# match those tables. A level missing here still codes the same bytes, only slower, so the CLI checks it:
+# FM4_CHECK_SPEC=1 makes bpl/fm4 fail when a level ran the general copy (tests/run.sh sets it).
+@[noinline]
 frame runChunk(mode: int, bb: int, limit: int, feat: uint, feat2: uint, widthF: long, data: *u8, L: long, i0: long, i1: long) {
+    local f: uint = feat & ~cast<uint>(64);
+    if (mode == 1 && f == cast<uint>(2097157) && feat2 == cast<uint>(0)) {
+        runChunkBody(1, bb, limit, cast<uint>(2097157), cast<uint>(0), widthF, data, L, i0, i1);
+        return;
+    }
+    if (mode == 1 && f == cast<uint>(39) && feat2 == cast<uint>(1)) {
+        runChunkBody(1, bb, limit, cast<uint>(39), cast<uint>(1), widthF, data, L, i0, i1);
+        return;
+    }
+    if (mode == 1 && f == cast<uint>(491695) && feat2 == cast<uint>(5)) {
+        runChunkBody(1, bb, limit, cast<uint>(491695), cast<uint>(5), widthF, data, L, i0, i1);
+        return;
+    }
+    if (mode == 1 && f == cast<uint>(494015) && feat2 == cast<uint>(7)) {
+        runChunkBody(1, bb, limit, cast<uint>(494015), cast<uint>(7), widthF, data, L, i0, i1);
+        return;
+    }
+    if (mode == 1 && f == cast<uint>(494015) && feat2 == cast<uint>(15)) {
+        runChunkBody(1, bb, limit, cast<uint>(494015), cast<uint>(15), widthF, data, L, i0, i1);
+        return;
+    }
+    if (mode == 2 && f == cast<uint>(2097152) && feat2 == cast<uint>(0)) {
+        runChunkBody(2, bb, limit, cast<uint>(2097152), cast<uint>(0), widthF, data, L, i0, i1);
+        return;
+    }
+    if (mode == 2 && f == cast<uint>(1048576) && feat2 == cast<uint>(128)) {
+        runChunkBody(2, bb, limit, cast<uint>(1048576), cast<uint>(128), widthF, data, L, i0, i1);
+        return;
+    }
+    if (mode == 2 && f == cast<uint>(1048608) && feat2 == cast<uint>(192)) {
+        runChunkBody(2, bb, limit, cast<uint>(1048608), cast<uint>(192), widthF, data, L, i0, i1);
+        return;
+    }
+    if (mode == 2 && f == cast<uint>(1049376) && feat2 == cast<uint>(210)) {
+        runChunkBody(2, bb, limit, cast<uint>(1049376), cast<uint>(210), widthF, data, L, i0, i1);
+        return;
+    }
+    if (mode == 2 && f == cast<uint>(1049376) && feat2 == cast<uint>(242)) {
+        runChunkBody(2, bb, limit, cast<uint>(1049376), cast<uint>(242), widthF, data, L, i0, i1);
+        return;
+    }
+    if (mode == 2 && f == cast<uint>(1048576) && feat2 == cast<uint>(384)) {
+        runChunkBody(2, bb, limit, cast<uint>(1048576), cast<uint>(384), widthF, data, L, i0, i1);
+        return;
+    }
+    if (mode == 2 && f == cast<uint>(1048608) && feat2 == cast<uint>(448)) {
+        runChunkBody(2, bb, limit, cast<uint>(1048608), cast<uint>(448), widthF, data, L, i0, i1);
+        return;
+    }
+    if (mode == 2 && f == cast<uint>(1049376) && feat2 == cast<uint>(466)) {
+        runChunkBody(2, bb, limit, cast<uint>(1049376), cast<uint>(466), widthF, data, L, i0, i1);
+        return;
+    }
+    if (mode == 2 && f == cast<uint>(1049376) && feat2 == cast<uint>(498)) {
+        runChunkBody(2, bb, limit, cast<uint>(1049376), cast<uint>(498), widthF, data, L, i0, i1);
+        return;
+    }
+    if (mode == 3 && f == cast<uint>(0) && feat2 == cast<uint>(0)) {
+        runChunkBody(3, bb, limit, cast<uint>(0), cast<uint>(0), widthF, data, L, i0, i1);
+        return;
+    }
+    if (mode == 3 && f == cast<uint>(32) && feat2 == cast<uint>(0)) {
+        runChunkBody(3, bb, limit, cast<uint>(32), cast<uint>(0), widthF, data, L, i0, i1);
+        return;
+    }
+    if (mode == 3 && f == cast<uint>(288) && feat2 == cast<uint>(2)) {
+        runChunkBody(3, bb, limit, cast<uint>(288), cast<uint>(2), widthF, data, L, i0, i1);
+        return;
+    }
+    if (mode == 3 && f == cast<uint>(2336) && feat2 == cast<uint>(34)) {
+        runChunkBody(3, bb, limit, cast<uint>(2336), cast<uint>(34), widthF, data, L, i0, i1);
+        return;
+    }
+    RAN_GENERAL = true;
+    runChunkBody(mode, bb, limit, feat, feat2, widthF, data, L, i0, i1);
+}
+
+
+
+@[always_inline, unchecked]
+frame runChunkBody(mode: int, bb: int, limit: int, feat: uint, feat2: uint, widthF: long, data: *u8, L: long, i0: long, i1: long) {
     local first: bool = i0 == 0;
     local img: bool = mode == 2;
     local aud: bool = mode == 3;
@@ -2273,6 +2369,7 @@ frame fm4InputIsScratch() {
 # Encode; result in fm4Result(). Returns container length. data is restored after an E8/E9 pass.
 @[c_export]
 frame fm4Encode(level: int, mode: int, width: long, data: *u8, L: long) ret long {
+    RAN_GENERAL = false;
     initTables();
     local best: *u8 = EXT_OUT;
     if (best == nullptr || EXT_CAP < L + HDR) {
@@ -2316,6 +2413,7 @@ frame fm4Encode(level: int, mode: int, width: long, data: *u8, L: long) ret long
 # as c/fm4.c.
 @[c_export]
 frame fm4Decode(f: *u8, n: long) ret long {
+    RAN_GENERAL = false;
     initTables();
     local ext: *u8 = EXT_OUT;
     local extCap: long = EXT_CAP;
@@ -2528,6 +2626,7 @@ export fm4EstimateDecode;
 export xalloc;
 export fm4StreamOk;
 export fm4UseBuffer;
+export fm4RanGeneral;
 export fm4InputIsScratch;
 export e8e9Detect;
 export fm4AllowAnyParams;
