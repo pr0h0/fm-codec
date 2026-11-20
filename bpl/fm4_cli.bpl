@@ -40,7 +40,7 @@ extern signal(sig: int, handler: Func<void>(int)) ret Func<void>(int);
 extern kill(pid: int, sig: int) ret int;
 extern getpid() ret int;
 
-global HDR_MAX: long = 36;   # 28-byte FM4 header + 8 (stream may exceed L by the header plus a little)
+global HDR_MAX: long = 36;   # the FM4 header: an encoded stream is at most L + HDR_MAX bytes
 global USAGE: string = "usage: fm4 enc LEVEL(0-5) bytes IN OUT | fm4 enc LEVEL image WIDTH IN OUT | fm4 enc LEVEL audio CHANNELS IN OUT | fm4 enc LEVEL video WIDTH HEIGHT IN OUT | fm4 dec IN OUT | fm4 enc|dec -t N ...\n";
 
 # Working memory for L input bytes on 2 MB huge pages where the system gives them (fewer TLB misses
@@ -411,7 +411,7 @@ frame encVideoSegments(level: int, width: long, data: *u8, L: long, ns: long, th
 # Decodes straight into the file out. Returns 0, or 1 for a corrupt file.
 frame decVideoSegments(f: *u8, n: long, threads: long, out: string) ret int {
     local ns: long = get64(&f[4]) & 4294967295;
-    if (ns > (n - 8) / 44) {   # each segment takes at least 8 + 36 bytes
+    if (ns > (n - 8) / (8 + HDR_MAX)) {   # each segment takes at least 8 + HDR_MAX bytes
         return 1;
     }
     local ins: **u8 = cast<**u8>(xalloc(ns * 8 + 8));
@@ -421,7 +421,7 @@ frame decVideoSegments(f: *u8, n: long, threads: long, out: string) ret int {
     local all: long = 0;
     local pos: long = 8;
     loop (local k: long = 0; k < ns; k = k + 1) {
-        if (n - pos < 44) {
+        if (n - pos < 8 + HDR_MAX) {
             return 1;
         }
         local m: long = get64(&f[pos]);
@@ -558,36 +558,26 @@ frame main(argc: int, argv: *string) ret int {
             }
             return 0;
         }
-        if (n >= 28) {
-            # original length (low 32 bits), mode and table bits from the header
-            local hl: long = cast<long>(f[16]) | (cast<long>(f[17]) << 8) | (cast<long>(f[18]) << 16) | (cast<long>(f[19]) << 24);
-            hugeArenaN(fm4EstimateDecode(hl, cast<int>(f[4]), cast<int>(f[5])));
-        }
-        # a header that passes the checks gets its output written in place, into the output file
-        local out: *u8 = nullptr;
-        local hL: long = (n >= 28) ? get64(&f[16]) : -1;
-        if (n >= 36 && fm4StreamOk(f, n, hL)) {
-            out = mapOut(argv[3], hL);
-            if (out == nullptr) {
-                return 1;
-            }
-            fm4UseBuffer(out, hL);
-        }
-        local L: long = fm4Decode(f, n);
-        if (out != nullptr) {
-            if (finishOut(argv[3], out, hL, L == hL) != 0) {
-                if (!IO_ERR) {
-                    printf("not an FM4 file\n");
-                }
-                return 1;
-            }
-            return 0;
-        }
-        if (L < 0) {
+        local hL: long = (n >= HDR_MAX) ? get64(&f[16]) : -1;
+        if (n < HDR_MAX || !fm4StreamOk(f, n, hL)) {
             printf("not an FM4 file\n");
             return 1;
         }
-        return spit(argv[3], fm4Result(), L);
+        # the header passed its checks: size the tables from it, decode in place into the output file
+        hugeArenaN(fm4EstimateDecode(hL, cast<int>(f[4]), cast<int>(f[5])));
+        local out: *u8 = mapOut(argv[3], hL);
+        if (out == nullptr) {
+            return 1;
+        }
+        fm4UseBuffer(out, hL);
+        local L: long = fm4Decode(f, n);
+        if (finishOut(argv[3], out, hL, L == hL) != 0) {
+            if (!IO_ERR) {
+                printf("not an FM4 file\n");
+            }
+            return 1;
+        }
+        return 0;
     }
     printf("%s", USAGE);
     return 2;

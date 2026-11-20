@@ -28,7 +28,7 @@ LEVELS = level_tables()
 
 def repair(d):  # mirrors LLVMFuzzerTestOneInput in fuzz_decode.c
     f = bytearray(d)
-    f[0:3] = b"FM4"; f[3] = 1 + (f[3] & 1); f[5] = 12 + f[5] % 3
+    f[0:4] = b"FM4\x02"; f[5] = 12 + f[5] % 3
     if f[9] & 1:
         mode, level = f[4] & 3, 1 + f[8] % 5
         feat, feat2 = LEVELS[mode if mode else 1][level]
@@ -37,7 +37,7 @@ def repair(d):  # mirrors LLVMFuzzerTestOneInput in fuzz_decode.c
         f[4] = mode; f[6] = 255; f[7] = 1 + f[7] % 15
         f[8:12] = struct.pack("<I", feat); f[24:28] = struct.pack("<I", feat2)
     f[16:24] = struct.pack("<Q", struct.unpack("<Q", bytes(f[16:24]))[0] & 0x3FF)
-    if f[3] == 2: f[32:36] = struct.pack("<I", zlib.crc32(bytes(f[:32])))
+    f[32:36] = struct.pack("<I", zlib.crc32(bytes(f[:32])))
     return bytes(f)
 
 def rt_args(d):  # mirrors LLVMFuzzerTestOneInput in fuzz_roundtrip.c: CLI arguments and the data

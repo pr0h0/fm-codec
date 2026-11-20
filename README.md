@@ -117,8 +117,7 @@ previous build was killed), and a 1.2 GB text file encodes at level 1 under 512 
 Disk: decoding reserves the output's size up front (Linux, and macOS in C), so a full disk is an error instead
 of a crash; the BPL build on macOS can only extend the file. Encoding needs free space of up to about twice the
 input (the reserved encoder buffer, plus an E8/E9 copy for executables) besides the output. When a temporary
-buffer can't be created, it falls back to memory. Format-1 files, whose header length has no bound, still decode
-into memory. Windows reads and writes files in memory.
+buffer can't be created, it falls back to memory. Windows reads and writes files in memory.
 
 **Platforms:** `c/fm4.c` builds on Linux, macOS and Windows (MinGW-w64, e.g. MSYS2 UCRT64:
 `make c/fm4 CC=gcc`); CI runs the test suite on Linux x86-64, macOS arm64 and Windows, and the locked output
