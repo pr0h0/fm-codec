@@ -125,8 +125,10 @@ export async function createFm4(source, { threads, workerUrl = new URL("./fm4wor
   // data must own its buffer (it is transferred to the worker)
   const run = async (op, data, opts) => {
     if (!useWorkers) {
-      inline ||= await loadFm4Wasm(module);
-      return op === "enc" ? inline.encode(data, opts) : inline.decode(data);
+      inline ||= loadFm4Wasm(module);   // the promise, so concurrent segments share one instance
+      const fm4 = await inline;
+      try { return op === "enc" ? fm4.encode(data, opts) : fm4.decode(data); }
+      catch (e) { inline = null; throw e; }   // a trap (corrupt input) may leave the instance half-updated, as in fm4worker.mjs
     }
     return new Promise((resolve, reject) => { queue.push({ op, data, opts, resolve, reject }); pump(); });
   };
