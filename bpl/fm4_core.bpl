@@ -715,18 +715,19 @@ frame arenaSize(mode: int, bb: int, feat: uint, feat2: uint, L: long, nchan: lon
     return total;
 }
 
-# ---- model ----
-# Codes bytes [i0, i1) of data. The first call (i0 == 0) builds the model in the arena; later calls
-# find the same blocks again (the arena is taken in the same order) and reload the few scalars and
-# small arrays that are kept in locals while the loop runs. The work is split into calls because
-# WebAssembly engines only switch a function to optimized code when it is entered again: one call
-# for the whole input would run in baseline code to the end.
 # the last fm4Encode / fm4Decode ran the general model copy (FM4_CHECK_SPEC in the CLI; see runChunk)
 @[c_export]
 frame fm4RanGeneral() ret bool {
     return RAN_GENERAL;
 }
 
+# ---- model ----
+# Codes bytes [i0, i1) of data. The first call (i0 == 0) builds the model in the arena; later calls
+# find the same blocks again (the arena is taken in the same order) and reload the few scalars and
+# small arrays that are kept in locals while the loop runs. The work is split into calls because
+# WebAssembly engines only switch a function to optimized code when it is entered again: one call
+# for the whole input would run in baseline code to the end.
+#
 # One copy of the model per level and mode, compiled with its feature bits as constants (run in c/fm4.c):
 # the unused features' code and branches drop out; same output. Other parameter sets (FEAT/FEAT2
 # experiments) run the general copy. The x86 bit (64) only tells the decoder to undo the transform.

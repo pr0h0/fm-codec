@@ -822,7 +822,7 @@ static int params_ok(int mode, uint32_t feat, uint32_t feat2, int64_t width, int
 /* One copy of the model per level and mode, compiled with its feature bits as constants: the compiler drops
    the unused features' code and branches (bytes level 1: ~35% faster; same output). Other parameter sets
    (FEAT/FEAT2 experiments) run the general copy. The x86 bit (64) only tells the decoder to undo the transform. */
-static int RAN_GENERAL;   /* the last run() used the general copy (no level matched; see spec_missed) */
+static int RAN_GENERAL;   /* the last encode / decode used the general copy (no level matched; see spec_missed) */
 static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, uint32_t feat2, int64_t width, uint8_t *data, int64_t L) {
     uint32_t f = feat & ~64u;
     RAN_GENERAL = 0;
@@ -847,6 +847,7 @@ static int64_t BIG;
 static uint8_t *scratch(int64_t n);
 static void scratch_free(void *p, int64_t n);
 static uint8_t *fm4_encode(int level, int mode, int64_t width, uint8_t *data, int64_t L, int64_t *outLen) {
+    RAN_GENERAL = 0;   /* per call (a stored stream never reaches run()) */
     uint32_t feat = LEVEL_FEAT(mode, level), feat2 = LEVEL_FEAT2(mode, level);
     int bb = level == 5 && mode == 1 ? 19 : 18, limit = 255;
     /* short inputs get small tables: 2^(bb-2) >= L (16 buckets each; larger tables would stay mostly empty).
@@ -895,6 +896,7 @@ static int stream_ok(const uint8_t *s, int64_t m, int64_t L) {
 }
 /* get(L, ctx) supplies the output buffer once L is known and checked (NULL: malloc); NULL result: corrupt */
 static uint8_t *fm4_decode_to(uint8_t *f, int64_t n, int64_t *outLen, uint8_t *(*get)(int64_t, void *), void *ctx) {
+    RAN_GENERAL = 0;   /* per call (a stored stream never reaches run()) */
     if (n < HDR) return NULL;
     int hd = HDR, mode = f[4], bb = f[5], limit = f[6]; uint32_t feat = get32(f + 8), feat2 = get32(f + 24);
     int64_t width = get32(f + 12), L = get64(f + 16);
