@@ -8,4 +8,5 @@ every later version and every build (C, BPL native, wasm); tests/run.sh checks t
   audio.L.fm4      8000 bytes of audio_2.pcm, 2 channels, levels 1-5
   video.L.fm4      4 frames of video_64x48.rgb, levels 1-5 (level 1 has no previous-frame model)
   segmented.2.fm4  text.txt slice at level 2 with SEG_MB=0.002: an FMS file of 3 segments
-  archive.fma      fm4 a 2 of tree/ (notes.txt, sub/prog.bin, sub/empty); C only
+  archive.fma      fm4 a 2 of tree/ (notes.txt, sub/prog.bin, sub/empty); C only. archive.tree: what it
+                   extracts to (find . | sort)

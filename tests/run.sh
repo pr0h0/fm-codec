@@ -74,15 +74,18 @@ if [ $nw = 1 ]; then node -e '
 # ---- format 1 is frozen: files written by v0.1.0 (tests/format1) must decode to the same bytes ----
 F1=$R/tests/format1
 mkdir -p "$D/f1"; : > "$D/f1/wasm.list"
-(cd "$D/f1" && $C x "$F1/archive.fma" x >/dev/null 2>&1) || bad "format 1: C cannot extract tests/format1/archive.fma"
+# (stderr is shown only when a check fails: it carries the decoder's error or a sanitizer report)
+(cd "$D/f1" && $C x "$F1/archive.fma" x >/dev/null 2>"$D/f1/err") || { cat "$D/f1/err"; bad "format 1: C cannot extract tests/format1/archive.fma"; }
+# the whole tree must come out as v0.1.0 wrote it: no file or directory more or less, empty files included
+[ "$(cd "$D/f1/x" 2>/dev/null && find . | sort)" = "$(cat "$F1/archive.tree")" ] || bad "format 1: archive.fma extracts a different tree than tests/format1/archive.tree"
 while read -r h name; do
     case $name in
     archive.fma/*) [ -f "$D/f1/x/${name#archive.fma/}" ] && [ "$(hash "$D/f1/x/${name#archive.fma/}")" = "$h" ] \
             || bad "format 1: archive.fma: ${name#archive.fma/} missing or different";;
     *)  for bin in "$C" $( [ $nb = 1 ] && echo "$B" ); do
             rm -f "$D/f1/out"
-            $bin dec "$F1/$name" "$D/f1/out" >/dev/null 2>&1 && [ "$(hash "$D/f1/out")" = "$h" ] \
-                || bad "format 1: ${bin#$R/} does not decode tests/format1/$name to the v0.1.0 bytes"
+            $bin dec "$F1/$name" "$D/f1/out" >/dev/null 2>"$D/f1/err" && [ "$(hash "$D/f1/out")" = "$h" ] \
+                || { cat "$D/f1/err"; bad "format 1: ${bin#$R/} does not decode tests/format1/$name to the v0.1.0 bytes"; }
         done
         echo "$F1/$name $h" >> "$D/f1/wasm.list";;
     esac
