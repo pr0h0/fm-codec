@@ -356,6 +356,7 @@ frame runJobs(nj: long, threads: long, decode: bool, mode: int, level: int, widt
                         _exit(1);
                     }
                     if (specMissed()) {
+                        fflush(nullptr);   # _exit skips the stdio flush
                         _exit(3);
                     }
                     if (fm4Result() != outs[j]) {
@@ -365,6 +366,7 @@ frame runJobs(nj: long, threads: long, decode: bool, mode: int, level: int, widt
                     local m2: long = encodeTo(level, mode, width, ins[j], Ls[j], &outs[j][8]);   # straight into the shared output
                     put64(outs[j], m2);
                     if (specMissed()) {
+                        fflush(nullptr);   # _exit skips the stdio flush
                         _exit(3);
                     }
                     if (fm4Result() != &outs[j][8]) {
@@ -376,7 +378,11 @@ frame runJobs(nj: long, threads: long, decode: bool, mode: int, level: int, widt
             running = running + 1;
         } else {
             if (wait(&st) < 0 || st != 0) {
-                fail = 1;
+                if (st != 768) {
+                    fail = 1;
+                } else if (fail == 0) {
+                    fail = 3;   # only workers' specMissed() (exit 3, FM4_CHECK_SPEC); any other failure wins
+                }
             }
             running = running - 1;
         }
@@ -431,7 +437,11 @@ frame encSegments(level: int, mode: int, width: long, data: *u8, L: long, ns: lo
             return 1;
         }
     }
-    if (runJobs(ns, threads, false, mode, level, width, ins, Ls, Ls, outs) != 0) {
+    local jr: int = runJobs(ns, threads, false, mode, level, width, ins, Ls, Ls, outs);
+    if (jr == 3) {
+        return 3;   # FM4_CHECK_SPEC: reported by the worker
+    }
+    if (jr != 0) {
         printf("compression failed\n");
         return 1;
     }
@@ -497,8 +507,12 @@ frame decSegments(f: *u8, n: long, threads: long, out: string) ret int {
         outs[k2] = &d[o];
         o = o + Ls[k2];
     }
-    local ok: bool = runJobs(ns, threads, true, 0, 0, 0, ins, Ms, Ls, outs) == 0;
-    return finishOut(out, d, all, ok);
+    local jr: int = runJobs(ns, threads, true, 0, 0, 0, ins, Ms, Ls, outs);
+    if (jr == 3) {
+        finishOut(out, d, all, false);
+        return 3;   # FM4_CHECK_SPEC: reported by the worker
+    }
+    return finishOut(out, d, all, jr == 0);
 }
 
 frame main(argc: int, argv: *string) ret int {
@@ -587,7 +601,11 @@ frame main(argc: int, argv: *string) ret int {
         }
         scratchDirFor(argv[3]);
         if (n >= 8 && f[0] == cast<u8>(70) && f[1] == cast<u8>(77) && f[2] == cast<u8>(83) && f[3] == cast<u8>(1)) {
-            if (decSegments(f, n, threads, argv[3]) != 0) {
+            local dr: int = decSegments(f, n, threads, argv[3]);
+            if (dr == 3) {
+                return 3;
+            }
+            if (dr != 0) {
                 if (!IO_ERR) {
                     printf("not an FM4 file, or corrupt\n");
                 }
