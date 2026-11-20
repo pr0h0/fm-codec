@@ -1,6 +1,7 @@
 /* libFuzzer: every input must encode and decode back exactly, in every mode and level. The first bytes
    choose level, mode and shape (always valid: the CLI rejects the rest); the remainder is the data.
    Tables use BB=12 so each run stays fast; the model logic is the same at every table size. */
+#define NO_FORK 1   /* in-process: no fork() under libFuzzer, and out_open must not mkstemp next to /dev/null */
 #define main fm4_cli_main
 #include "../../c/fm4.c"
 #undef main
