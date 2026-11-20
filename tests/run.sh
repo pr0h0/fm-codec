@@ -109,8 +109,8 @@ for t in "text.txt 2 bytes" "x86.bin 3 bytes" "img_96.rgb 3 image 96" "audio_2.p
     $C dec "$D/g1" "$D/d" && cmp -s "$D/d" "$f" || bad "C segmented round trip $nm"
     echo "$(basename "$f") seg $(hash "$D/g1")" >> "$D/hashes"
     if [ $nb = 1 ]; then
-        SEG_MB=0.005 $B enc -t 2 $lv "$@" "$f" "$D/gb" && cmp -s "$D/gb" "$D/g1" || bad "BPL segments differ from C: $nm"
-        $B dec "$D/g1" "$D/d" && cmp -s "$D/d" "$f" || bad "BPL segmented decode $nm"
+        FM4_CHECK_SPEC=1 SEG_MB=0.005 $B enc -t 2 $lv "$@" "$f" "$D/gb" && cmp -s "$D/gb" "$D/g1" || bad "BPL segments differ from C: $nm"
+        FM4_CHECK_SPEC=1 $B dec "$D/g1" "$D/d" && cmp -s "$D/d" "$f" || bad "BPL segmented decode $nm"
     fi
     if [ $nw = 1 ]; then node -e '
       const fs = require("fs"), [dir, inp, ref, lv, mode, a] = process.argv.slice(1);

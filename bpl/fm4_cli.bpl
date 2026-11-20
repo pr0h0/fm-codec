@@ -355,12 +355,18 @@ frame runJobs(nj: long, threads: long, decode: bool, mode: int, level: int, widt
                     if (m != Ls[j]) {
                         _exit(1);
                     }
+                    if (specMissed()) {
+                        _exit(3);
+                    }
                     if (fm4Result() != outs[j]) {
                         memcpy(cast<*void>(outs[j]), cast<*void>(fm4Result()), m);
                     }
                 } else {
                     local m2: long = encodeTo(level, mode, width, ins[j], Ls[j], &outs[j][8]);   # straight into the shared output
                     put64(outs[j], m2);
+                    if (specMissed()) {
+                        _exit(3);
+                    }
                     if (fm4Result() != &outs[j][8]) {
                         memcpy(cast<*void>(&outs[j][8]), cast<*void>(fm4Result()), m2);
                     }

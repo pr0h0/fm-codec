@@ -60,7 +60,7 @@ global DB: *u8 = nullptr;
 global DB_CAP: long = 0;
 global EXT_OUT: *u8 = nullptr;   # fm4UseBuffer(): the next result goes here instead of OB0 / DB
 global EXT_CAP: long = 0;
-global RAN_GENERAL: bool = false;   # runChunk used the general model copy (no specialized level matched)
+global RAN_GENERAL: bool = false;   # the last fm4Encode / fm4Decode ran the general model copy (no specialized level matched)
 global IN_SCRATCH: bool = false;   # fm4InputIsScratch(): the next fm4Encode need not restore its input
 global IB: *u8 = nullptr;
 global IB_CAP: long = 0;
@@ -2365,6 +2365,7 @@ frame fm4InputIsScratch() {
 # Encode; result in fm4Result(). Returns container length. data is restored after an E8/E9 pass.
 @[c_export]
 frame fm4Encode(level: int, mode: int, width: long, data: *u8, L: long) ret long {
+    RAN_GENERAL = false;
     initTables();
     local best: *u8 = EXT_OUT;
     if (best == nullptr || EXT_CAP < L + HDR) {
@@ -2408,6 +2409,7 @@ frame fm4Encode(level: int, mode: int, width: long, data: *u8, L: long) ret long
 # as c/fm4.c.
 @[c_export]
 frame fm4Decode(f: *u8, n: long) ret long {
+    RAN_GENERAL = false;
     initTables();
     local ext: *u8 = EXT_OUT;
     local extCap: long = EXT_CAP;
