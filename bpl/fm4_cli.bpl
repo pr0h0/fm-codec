@@ -377,8 +377,11 @@ frame runJobs(nj: long, threads: long, decode: bool, mode: int, level: int, widt
             }
             running = running + 1;
         } else {
-            if (wait(&st) < 0 || st != 0) {
-                if (st != 768) {
+            if (wait(&st) < 0) {
+                fail = 1;
+            } else if (st != 0) {
+                # status: exit code in bits 8-15, a signal in bits 0-6 (WEXITSTATUS / WTERMSIG)
+                if ((st & 127) != 0 || ((st >> 8) & 255) != 3) {
                     fail = 1;
                 } else if (fail == 0) {
                     fail = 3;   # only workers' specMissed() (exit 3, FM4_CHECK_SPEC); any other failure wins
