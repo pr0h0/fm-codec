@@ -2,7 +2,7 @@
 # fm4 enc LEVEL audio CHANNELS IN OUT | fm4 enc LEVEL video WIDTH HEIGHT IN OUT | fm4 dec IN OUT
 # fm4 enc|dec -t N ...: processes for segments (same FMS format and cut as c/fm4.c).
 import printf, malloc, strcmp, atoi, snprintf from "std/c.bpl";
-import fm4Encode, fm4Decode, fm4Result, fm4Estimate, fm4EstimateDecode, fm4SetArena, xalloc, fm4StreamOk, fm4AllowAnyParams, fm4UseBuffer, fm4InputIsScratch, e8e9Detect from "./fm4_core.bpl";
+import fm4Encode, fm4Decode, fm4Result, fm4Estimate, fm4EstimateDecode, fm4SetArena, xalloc, fm4StreamOk, fm4AllowAnyParams, fm4UseBuffer, fm4InputIsScratch, e8e9Detect, fm4RanGeneral from "./fm4_core.bpl";
 
 extern fopen(path: string, mode: string) ret *void;
 extern fread(buffer: *void, size: long, count: long, stream: *void) ret long;
@@ -398,6 +398,16 @@ frame encodeTo(level: int, mode: int, width: long, data0: *u8, L: long, out: *u8
     return fm4Encode(level, mode, width, data, L);
 }
 
+# FM4_CHECK_SPEC=1: true (with a message) when the model ran its general copy, i.e. runChunk's list of levels
+# no longer matches levelFeat / levelFeat2 (the output is the same; only the speed would be lost)
+frame specMissed() ret bool {
+    if (getenv("FM4_CHECK_SPEC") != nullptr && fm4RanGeneral()) {
+        printf("fm4: this level ran the general model copy: runChunk's level list does not match levelFeat\n");
+        return true;
+    }
+    return false;
+}
+
 frame encSegments(level: int, mode: int, width: long, data: *u8, L: long, ns: long, threads: long, out: string) ret int {
     local unit: long = segUnit(mode, width);
     local nu: long = L / unit;
@@ -558,6 +568,9 @@ frame main(argc: int, argv: *string) ret int {
             eb = mapTemp(L + HDR);   # the result (at most L + HDR bytes) in a temporary file
         }
         local n: long = encodeTo(level, mode, width, data, L, eb);
+        if (specMissed()) {
+            return 3;
+        }
         return spit(argv[ia + 1], fm4Result(), n);
     }
     if (argc == 4 && strcmp(argv[1], "dec") == 0) {
@@ -589,6 +602,10 @@ frame main(argc: int, argv: *string) ret int {
         }
         fm4UseBuffer(out, hL);
         local L: long = fm4Decode(f, n);
+        if (specMissed()) {
+            finishOut(argv[3], out, hL, false);
+            return 3;
+        }
         if (finishOut(argv[3], out, hL, L == hL) != 0) {
             if (!IO_ERR) {
                 printf("not an FM4 file\n");

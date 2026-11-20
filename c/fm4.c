@@ -820,7 +820,7 @@ static int params_ok(int mode, uint32_t feat, uint32_t feat2, int64_t width, int
     return 0;
 }
 /* One copy of the model per level and mode, compiled with its feature bits as constants: the compiler drops
-   the unused features' code and branches (bytes level 1: ~30% faster; same output). Other parameter sets
+   the unused features' code and branches (bytes level 1: ~35% faster; same output). Other parameter sets
    (FEAT/FEAT2 experiments) run the general copy. The x86 bit (64) only tells the decoder to undo the transform. */
 static void run(Coder *c, int mode, int bb, int limit, uint32_t feat, uint32_t feat2, int64_t width, uint8_t *data, int64_t L) {
     uint32_t f = feat & ~64u;

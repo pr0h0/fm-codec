@@ -35,8 +35,9 @@ while read -r name mode args; do
         $C dec "$o" "$D/d" && cmp -s "$D/d" "$f" || bad "C round trip $lv $mode $name"
         echo "$name $lv $(hash "$o")" >> "$D/hashes"
         if [ $nb = 1 ]; then
-            $B enc $lv $mode $args "$f" "$D/b" && cmp -s "$D/b" "$o" || bad "BPL output differs from C: $lv $mode $name"
-            $B dec "$o" "$D/d" && cmp -s "$D/d" "$f" || bad "BPL decode $lv $mode $name"
+            # FM4_CHECK_SPEC: every level must run its specialized model copy (else it is only slower, see runChunk)
+            FM4_CHECK_SPEC=1 $B enc $lv $mode $args "$f" "$D/b" && cmp -s "$D/b" "$o" || bad "BPL output differs from C: $lv $mode $name"
+            FM4_CHECK_SPEC=1 $B dec "$o" "$D/d" && cmp -s "$D/d" "$f" || bad "BPL decode $lv $mode $name"
         fi
         echo "$f $o $lv $mode $args" >> "$D/wasm.list"
     done

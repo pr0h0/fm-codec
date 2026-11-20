@@ -60,6 +60,7 @@ global DB: *u8 = nullptr;
 global DB_CAP: long = 0;
 global EXT_OUT: *u8 = nullptr;   # fm4UseBuffer(): the next result goes here instead of OB0 / DB
 global EXT_CAP: long = 0;
+global RAN_GENERAL: bool = false;   # runChunk used the general model copy (no specialized level matched)
 global IN_SCRATCH: bool = false;   # fm4InputIsScratch(): the next fm4Encode need not restore its input
 global IB: *u8 = nullptr;
 global IB_CAP: long = 0;
@@ -722,7 +723,9 @@ frame arenaSize(mode: int, bb: int, feat: uint, feat2: uint, L: long, nchan: lon
 # One copy of the model per level and mode, compiled with its feature bits as constants (run in c/fm4.c):
 # the unused features' code and branches drop out; same output. Other parameter sets (FEAT/FEAT2
 # experiments) run the general copy. The x86 bit (64) only tells the decoder to undo the transform.
-# Values: levelFeat / levelFeat2 (image levels 2-5 also with the video bit 256 in feat2; audio 5 = 4).
+# Values: levelFeat / levelFeat2 (image levels 2-5 also with the video bit 256 in feat2; audio 5 = 4); they must
+# match those tables. A level missing here still codes the same bytes, only slower, so the CLI checks it:
+# FM4_CHECK_SPEC=1 makes bpl/fm4 fail when a level ran the general copy (tests/run.sh sets it).
 @[noinline]
 frame runChunk(mode: int, bb: int, limit: int, feat: uint, feat2: uint, widthF: long, data: *u8, L: long, i0: long, i1: long) {
     local f: uint = feat & ~cast<uint>(64);
@@ -798,7 +801,14 @@ frame runChunk(mode: int, bb: int, limit: int, feat: uint, feat2: uint, widthF: 
         runChunkBody(3, bb, limit, cast<uint>(2336), cast<uint>(34), widthF, data, L, i0, i1);
         return;
     }
+    RAN_GENERAL = true;
     runChunkBody(mode, bb, limit, feat, feat2, widthF, data, L, i0, i1);
+}
+
+
+@[c_export]
+frame fm4RanGeneral() ret bool {
+    return RAN_GENERAL;
 }
 
 @[always_inline, unchecked]
@@ -2610,6 +2620,7 @@ export fm4EstimateDecode;
 export xalloc;
 export fm4StreamOk;
 export fm4UseBuffer;
+export fm4RanGeneral;
 export fm4InputIsScratch;
 export e8e9Detect;
 export fm4AllowAnyParams;
