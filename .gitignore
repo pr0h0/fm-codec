@@ -10,13 +10,6 @@ bpl/*
 
 # test data and run artifacts (regenerate with tools/make_testdata.sh)
 testdata/
-out/
-out1g/
-out_c_*.fm2
-*.frc
-*.fm2
-*.fm3
-*.frx
 
 __pycache__/
 node_modules/

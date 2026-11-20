@@ -16,7 +16,6 @@ The crucial refinement: **do not directly take the serialized integer as the num
 
 ```text
 numerator:   arbitrary-precision nonnegative integer
-ominator:  [not used]
 denominator: arbitrary-precision positive integer
 length:      number of decimal prefix digits to recover
 ```

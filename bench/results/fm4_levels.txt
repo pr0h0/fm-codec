@@ -1,0 +1,30 @@
+fm4 levels, C build (clang -O3 -march=native -ffp-contract=off), one thread, Intel i7-6700, 2026-11-20
+inputs (tools/make_testdata.sh): text = first 4 MB of text_10mb.bin (Python stdlib sources), bin = first 4 MB of bin_10mb.bin (LLVM shared library),
+img = thumbnail-A-original.rgb (2048x1152 raw RGB24). enc/dec = seconds and peak RSS in KB (/usr/bin/time -f '%e %M'); every decode verified
+
+text L1 size=519189 enc=1.47 61856 dec=1.68 62104
+text L2 size=455402 enc=3.95 127552 dec=4.26 127360
+text L3 size=407986 enc=5.94 322452 dec=6.60 322568
+text L4 size=374113 enc=9.66 355492 dec=10.00 355600
+text L5 size=368966 enc=15.03 633892 dec=14.96 634128
+text xz-9e 534452
+text zstd-19 548211
+bin L1 size=1321080 enc=1.55 63072 dec=1.66 62996
+bin L2 size=1228883 enc=4.05 128260 dec=4.24 128576
+bin L3 size=1160993 enc=7.51 324184 dec=7.18 323856
+bin L4 size=1081445 enc=10.88 356712 dec=10.85 356896
+bin L5 size=1058302 enc=16.07 635244 dec=16.53 635168
+bin xz-9e 1450664
+bin zstd-19 1524602
+img L1 size=2752612 enc=2.94 24156 dec=3.16 24408
+img L2 size=2447792 enc=5.08 151572 dec=5.29 151696
+img L3 size=2416103 enc=7.73 184356 dec=8.11 184480
+img L4 size=2374733 enc=13.83 250328 dec=14.16 250320
+img L5 size=2349037 enc=17.85 250200 dec=18.12 250192
+img xz-9e 4704872
+img zstd-19 5248532
+text gzip-9 790278
+bin gzip-9 1916366
+img gzip-9 5685102
+img png (ffmpeg, compression_level 9, pred mixed) 3889085
+img jpeg-xl lossless effort 7 (ffmpeg libjxl) 2493546

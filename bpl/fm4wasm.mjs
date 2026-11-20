@@ -1,4 +1,4 @@
-// Browser/Node/Bun host for the BPL-compiled fm4.wasm (same API shape as fm3wasm.mjs).
+// Browser/Node/Bun host for the BPL-compiled fm4.wasm.
 //   const fm4 = await loadFm4Wasm(wasmBytesOrResponse);
 //   fm4.encode(Uint8Array, { level, mode: 'bytes' | 'image', width }) -> Uint8Array
 //   fm4.encode(pcm16le, { level, mode: 'audio', channels }), fm4.encode(rgbFrames, { level, mode: 'video', width, height })
