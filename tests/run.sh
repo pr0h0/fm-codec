@@ -123,6 +123,21 @@ for t in "text.txt 2 bytes" "x86.bin 3 bytes" "img_96.rgb 3 image 96" "audio_2.p
       });' "$R/bpl" "$f" "$D/g1" $lv "$@" || bad "wasm (createFm4) segments differ from C: $nm"; fi
 done
 
+# createFm4 without workers (Node) runs calls one at a time; a corrupt segmented file must reject without
+# breaking the calls queued next to it, and a call after the failure must load a fresh instance and succeed
+if [ $nw = 1 ]; then
+    SEG_MB=0.005 $C enc 3 bytes "$D/in/text.txt" "$D/inl.fms" || bad "C enc for the inline-pool check"
+    node -e '
+      const fs = require("fs"), [dir, good] = process.argv.slice(1);
+      import(require("url").pathToFileURL(dir + "/fm4wasm.mjs").href).then(async ({ createFm4 }) => {
+        const fm4 = await createFm4(fs.readFileSync(dir + "/fm4.wasm"));
+        const g = new Uint8Array(fs.readFileSync(good)), bad = g.slice(); bad[bad.length - 3] ^= 0x55;
+        const r = await Promise.allSettled([fm4.decode(bad), fm4.decode(g), fm4.decode(g)]);
+        const after = await fm4.decode(g).then(() => "ok", () => "fail");
+        process.exit(r.map((x) => x.status).join() === "rejected,fulfilled,fulfilled" && after === "ok" ? 0 : 1);
+      });' "$R/bpl" "$D/inl.fms" || bad "wasm: createFm4 inline calls do not recover after a failed call"
+fi
+
 # ---- archive ----
 mkdir -p "$D/tree/sub/deeper" "$D/tree/empty"
 cp "$D/in/text.txt" "$D/in/random.bin" "$D/tree/"; cp "$D/in/bin.dat" "$D/tree/sub/"; cp "$D/in/one.bin" "$D/tree/sub/deeper/"
