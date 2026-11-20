@@ -2,9 +2,10 @@
 # Shared by the native CLI (fm4_cli.bpl) and the WebAssembly build (fm4_wasm.bpl).
 # All working memory comes from reusable global buffers: wasm32 freestanding malloc is a bump
 # allocator whose free() is a no-op, so repeated encode/decode calls must not allocate afresh.
-# The model loop is runChunk(); run() calls it for 16 KB of input at a time (see runChunk).
-# Helpers are @[unchecked] leaf functions (no index/null checks, no stack guard); runChunk itself keeps
-# its checks, as it also decodes untrusted input.
+# The model loop is runChunkBody(); run() calls runChunk() for 16 KB of input at a time, which runs the body's
+# copy for the stream's level (see runChunk). The body and the helpers are @[unchecked] (no index/null checks,
+# no stack guard): untrusted input is safe because decoders accept only the level parameter sets (paramsOk),
+# whose indexing stays in bounds, and the libFuzzer harnesses check this on C (same model).
 # The OLS predictor is floating point: every expression keeps the exact operation order of
 # ols_pred / ols_upd in c/fm4.c (no fused multiply-add, no reordering); sqrt and floor are the
 # LLVM intrinsics (sqrtsd / f64.sqrt), which are correctly rounded like libm's.
