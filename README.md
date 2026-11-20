@@ -150,7 +150,7 @@ than FLAC.
 
 | Clip | fm4 | best other tool |
 |---|---:|---:|
-| screen recording | 0.0055 | x264 lossless: 0.0091 |
+| screen recording | 0.0055 | xz -9e: 0.0071 |
 | stick-figure animation | 0.0110 | xz -9e: 0.0204 |
 | animated background | 0.0532 | xz -9e: 0.0942 |
 | camera footage | 0.2066 | ffv1: 0.2408 |
