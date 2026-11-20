@@ -72,14 +72,16 @@ if [ $nw = 1 ]; then node -e '
   });' "$R/bpl" "$R/tests/large_bb/bb21.fm4" || bad "wasm: a bb=21 stream must fail with a clear out-of-memory error"; fi
 
 # ---- hostile files found by fuzzing (tests/fuzz): each must be rejected, without a crash ----
-# each must also pass the header checks (current magic and version, header CRC), or it would be rejected there
+# each must also pass the header checks (current magic and version, header CRC, length bound), or it would be rejected there
 # and no longer reach the check it was written for
 for h in "$R"/tests/hostile/*.fm4; do
     python3 -c "
 import sys, zlib, struct
 d = open(sys.argv[1], 'rb').read()
-sys.exit(not (len(d) >= 36 and d[:4] == b'FM4\\x01' and struct.unpack('<I', d[32:36])[0] == zlib.crc32(d[:32])))" "$h" \
-        || bad "tests/hostile/$(basename "$h"): stale header (wrong version or header CRC), the test would not reach its target check"
+L, m = struct.unpack('<Q', d[16:24])[0] if len(d) >= 24 else -1, len(d) - 36
+sys.exit(not (m >= 0 and d[:4] == b'FM4\\x01' and struct.unpack('<I', d[32:36])[0] == zlib.crc32(d[:32])
+              and 0 <= L <= 1 << 40 and (L <= m if d[4] == 0 else L // 4096 <= m)))" "$h" \
+        || bad "tests/hostile/$(basename "$h"): stale header (version, header CRC or length bound), the test would not reach its target check"
     for bin in "$C" $( [ $nb = 1 ] && echo "$B" ); do
         $T $bin dec "$h" "$D/d" >/dev/null 2>&1; rc=$?
         [ $rc = 1 ] || bad "${bin#$R/} dec tests/hostile/$(basename "$h"): exit status $rc (want 1)"
