@@ -104,8 +104,18 @@ export async function createFm4(source, { threads, workerUrl = new URL("./fm4wor
   const hw = (typeof navigator !== "undefined" && navigator.hardwareConcurrency) || 4;
   const max = Math.max(1, threads || Math.min(hw, 4));
   const useWorkers = typeof Worker !== "undefined";
-  let inline = null;
-  const drop = (p) => { if (inline === p) inline = null; };
+  // without workers: one call at a time on one instance (chained), so an instance a trap may have left
+  // half-updated, or a failed load, is never reused: the next call loads a fresh one (as fm4worker.mjs)
+  // the chain's value is the instance for the next call; a call that throws, or a failed load, leaves null
+  let chain = Promise.resolve(null);
+  const runInline = (op, data, opts) => {
+    const r = chain.then(async (inst) => {
+      const fm4 = inst || await loadFm4Wasm(module);
+      return [fm4, op === "enc" ? fm4.encode(data, opts) : fm4.decode(data)];
+    });
+    chain = r.then(([fm4]) => fm4, () => null);
+    return r.then(([, out]) => out);
+  };
   const idle = [], all = [], queue = [];
   let seq = 0;
   const pump = () => {
@@ -125,12 +135,7 @@ export async function createFm4(source, { threads, workerUrl = new URL("./fm4wor
   };
   // data must own its buffer (it is transferred to the worker)
   const run = async (op, data, opts) => {
-    if (!useWorkers) {
-      const p = (inline ||= loadFm4Wasm(module));   // the promise, so concurrent segments share one instance
-      const fm4 = await p;
-      try { return op === "enc" ? fm4.encode(data, opts) : fm4.decode(data); }
-      catch (e) { drop(p); throw e; }   // a trap (corrupt input) may leave the instance half-updated, as in fm4worker.mjs
-    }
+    if (!useWorkers) return runInline(op, data, opts);
     return new Promise((resolve, reject) => { queue.push({ op, data, opts, resolve, reject }); pump(); });
   };
   const own = (u8, a = 0, b = u8.length) => u8.slice(a, b);
