@@ -14,7 +14,7 @@ The file is still one number, `N / 256^k`, but the model decides how it is read 
 ## Earlier formats
 
 Each format below was a complete codec with its own C reference and ports. None of them is in the current
-tree. Their code is in the git history, at tag `fm1-fm3`.
+tree. Their code is in the git history, at tag [`fm1-fm3`](https://github.com/pr0h0/fm-codec/tree/fm1-fm3).
 
 | Format | Main ideas | Implementations |
 |---|---|---|
