@@ -18,7 +18,7 @@ global HDR: long = 36;    # header size
 global BB_MIN: int = 12;       # table bits a stream may use (c/fm4.c BB_MIN, BB_DEC_MAX); the encoder writes <= 20
 global BB_DEC_MAX: int = 22;
 global CRC_T: *uint = nullptr;
-global G_END: long = 0;   # decoding stops once G_POS passes it (format 2)
+global G_END: long = 0;   # decoding stops once G_POS passes it
 global G_CRC: uint = 0;   # CRC-32 of the data being encoded
 global ANY_FEAT: bool = false;   # fm4AllowAnyParams(): accept files from FEAT/FEAT2/LR experiments (trusted input)
 
@@ -2256,7 +2256,7 @@ frame writeHeader(h: *u8, mode: int, bb: int, limit: int, lr: int, feat: uint, f
     h[0] = cast<u8>(70);
     h[1] = cast<u8>(77);
     h[2] = cast<u8>(52);
-    h[3] = cast<u8>(2);
+    h[3] = cast<u8>(1);
     h[4] = cast<u8>(mode);
     h[5] = cast<u8>(bb);
     h[6] = cast<u8>(limit);
@@ -2539,7 +2539,7 @@ frame fm4AllowAnyParams() {
 @[c_export]
 frame fm4StreamOk(s: *u8, m: long, L: long) ret bool {
     initTables();
-    if (m < HDR || s[0] != cast<u8>(70) || s[1] != cast<u8>(77) || s[2] != cast<u8>(52) || s[3] != cast<u8>(2) || L < 0 || L > 1099511627776) {
+    if (m < HDR || s[0] != cast<u8>(70) || s[1] != cast<u8>(77) || s[2] != cast<u8>(52) || s[3] != cast<u8>(1) || L < 0 || L > 1099511627776) {
         return false;
     }
     if (get32(ptrAdd(s, 32)) != crc32Of(s, 32)) {

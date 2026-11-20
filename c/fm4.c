@@ -5,13 +5,13 @@
  *   experiments: env FEAT, FEAT2 (feature bits, override the level), BB (log2 buckets/table), LR, HUGE=0;
  *   decoding files made with FEAT/FEAT2/LR needs FM4_ANY_FEAT=1 (C and the native BPL CLI; trusted input only)
  *
- * Container, format 2 (36-byte header, little endian):
- *   "FM4\x02" | mode u8 (0 store, 1 bytes, 2 image/video, 3 audio) | bb u8 | counter limit u8 | mixer lr u8
+ * Container, format 1 (36-byte header, little endian):
+ *   "FM4\x01" | mode u8 (0 store, 1 bytes, 2 image/video, 3 audio) | bb u8 | counter limit u8 | mixer lr u8
  *   | feat u32 | width u32 | L u64 | feat2 u32 | CRC-32 of the data u32 | CRC-32 of header bytes 0-31 u32
  *   | payload (store: raw bytes; else the arithmetic coder's bytes, all of them)
  *   width: image width; audio: channels (1-8); video: width | frame height << 16.
- *   The version byte changes whenever an existing decoder could not read the new files. Until a release, decoders
- *   read only the current version (format 1, 28 bytes without CRCs, is no longer read).
+ *   Until a first release, format 1 is the only format and may still change; after it, the version byte changes
+ *   whenever an existing decoder could not read the new files.
  *
  * Feature bits 2 (feat2):
  *   1 mixer selection by hit count   2 4th mixer   4 text contexts   8 run inputs   16 OLS predictor
@@ -148,7 +148,7 @@ static inline uint32_t *find_bucket(uint32_t *T, int bb, uint32_t h) {
     return v;
 }
 
-/* end: decoding stops once pos passes it (format 2: a valid stream is never read past its last byte) */
+/* end: decoding stops once pos passes it (a valid stream is never read past its last byte) */
 typedef struct { uint32_t x1, x2, x; uint8_t *buf; int64_t len, pos, cap; int dec; int64_t end; } Coder;
 /* the encoder writes into a buffer of L + HDR bytes: a longer result would be stored instead, so when it is
    full, coding stops (pos > end ends run()'s loop) */
@@ -781,7 +781,7 @@ static uint32_t crc32_of(const uint8_t *p, int64_t n) {
 }
 static int64_t get64(const uint8_t *p) { return (int64_t)((uint64_t)get32(p) | (uint64_t)get32(p + 4) << 32); }   /* unsigned shift: no overflow UB */
 static void header(uint8_t *h, int mode, int bb, int limit, int lr, uint32_t feat, uint32_t feat2, int64_t width, int64_t L, uint32_t crc) {
-    memcpy(h, "FM4\x02", 4); h[4] = mode; h[5] = bb; h[6] = limit; h[7] = lr;
+    memcpy(h, "FM4\x01", 4); h[4] = mode; h[5] = bb; h[6] = limit; h[7] = lr;
     put32(h + 8, feat); put32(h + 12, (uint32_t)width); put32(h + 16, (uint32_t)L); put32(h + 20, (uint32_t)((uint64_t)L >> 32));
     put32(h + 24, feat2); put32(h + 28, crc); put32(h + 32, crc32_of(h, 32));
 }
@@ -891,7 +891,7 @@ static uint8_t *fm4_encode(int level, int mode, int64_t width, uint8_t *data, in
    it; containers call it for each stream before adding the lengths up and allocating. Decoding then stops at the
    end of the payload, and the CRC of the result must match. */
 static int stream_ok(const uint8_t *s, int64_t m, int64_t L) {
-    if (m < HDR || memcmp(s, "FM4\x02", 4) || L < 0 || L > (int64_t)1 << 40) return 0;
+    if (m < HDR || memcmp(s, "FM4\x01", 4) || L < 0 || L > (int64_t)1 << 40) return 0;
     return get32(s + 32) == crc32_of(s, 32) && (s[4] == 0 ? L <= m - HDR : L / 4096 <= m - HDR);
 }
 /* get(L, ctx) supplies the output buffer once L is known and checked (NULL: malloc); NULL result: corrupt */
@@ -1072,7 +1072,7 @@ static int spit(const char *path, uint8_t *b, int64_t n) {
     if ((int64_t)fwrite(b, 1, n, f) != n || fclose(f)) { perror(path); return 1; }
     return 0;
 }
-/* ---- archive: "FMA\x02" | u32 nsolid | stream* ; stream = u64 length | FM4 stream.
+/* ---- archive: "FMA\x01" | u32 nsolid | stream* ; stream = u64 length | FM4 stream.
    The first nsolid streams (bytes mode), decoded and joined, are the index followed by the solid data of every file, files sorted by extension.
    Index: u32 count | per file: u16 path length | path | u32 permissions | u64 size | u64 a | u64 b.
    For a file with b > 0, bytes [a, a+b) are not in the solid data but in a stream of their own (next in file order):
@@ -1258,7 +1258,7 @@ static int archive(int level, int media, int threads, const char *out, char **pa
     if (jr) { if (jr == 1) fprintf(stderr, "compression failed\n"); return jr; }
     FILE *f = fopen(out, "wb"); if (!f) { perror(out); return 1; }
     int64_t written = 8, k = nsolid; uint8_t n4[4] = {nsolid, nsolid >> 8, nsolid >> 16, nsolid >> 24};
-    fwrite("FMA\x02", 1, 4, f); fwrite(n4, 1, 4, f);
+    fwrite("FMA\x01", 1, 4, f); fwrite(n4, 1, 4, f);
     for (int i = 0; i < nj; i++) { int64_t m = get64(jobs[i].out); fwrite(jobs[i].out, 1, 8 + m, f); written += 8 + m; }
     for (int i = 0; i < nsolid; i++) fprintf(stderr, "solid  %12lld -> %12lld  (index and all other data, part %d of %d)\n", (long long)jobs[i].L, (long long)get64(jobs[i].out), i + 1, nsolid);
     for (int i = 0; i < nents; i++) { Ent *e = &ents[i]; if (e->b) { fprintf(stderr, "%-6s %12lld -> %12lld  %s\n", e->mode == 3 ? "audio" : e->mode == 2 ? "image" : "stored", (long long)e->b, (long long)get64(jobs[k].out), e->path); k++; } }
@@ -1268,7 +1268,7 @@ static int archive(int level, int media, int threads, const char *out, char **pa
 }
 static int extract(const char *in, const char *dir, int threads) {
     int64_t n, sn = 0, all = 0; uint8_t *f = map_in(in, &n);
-    if (n < 8 || memcmp(f, "FMA\x02", 4)) { fprintf(stderr, "not an FMA archive\n"); return 1; }
+    if (n < 8 || memcmp(f, "FMA\x01", 4)) { fprintf(stderr, "not an FMA archive\n"); return 1; }
     int64_t nsolid = get32(f + 4), nj = 0, cap = 0; Job *jobs = NULL;
     for (int64_t pos = 8; pos < n; ) {   /* list the streams, then decode them all in parallel into one shared buffer */
         if (n - pos < 8 + HDR) goto bad;

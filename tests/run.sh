@@ -72,7 +72,16 @@ if [ $nw = 1 ]; then node -e '
   });' "$R/bpl" "$R/tests/large_bb/bb21.fm4" || bad "wasm: a bb=21 stream must fail with a clear out-of-memory error"; fi
 
 # ---- hostile files found by fuzzing (tests/fuzz): each must be rejected, without a crash ----
+# each must also pass the header checks (current magic and version, header CRC, length bound), or it would be rejected there
+# and no longer reach the check it was written for
 for h in "$R"/tests/hostile/*.fm4; do
+    python3 -c "
+import sys, zlib, struct
+d = open(sys.argv[1], 'rb').read()
+L, m = struct.unpack('<Q', d[16:24])[0] if len(d) >= 24 else -1, len(d) - 36
+sys.exit(not (m >= 0 and d[:4] == b'FM4\\x01' and struct.unpack('<I', d[32:36])[0] == zlib.crc32(d[:32])
+              and 0 <= L <= 1 << 40 and (L <= m if d[4] == 0 else L // 4096 <= m)))" "$h" \
+        || bad "tests/hostile/$(basename "$h"): stale header (version, header CRC or length bound), the test would not reach its target check"
     for bin in "$C" $( [ $nb = 1 ] && echo "$B" ); do
         $T $bin dec "$h" "$D/d" >/dev/null 2>&1; rc=$?
         [ $rc = 1 ] || bad "${bin#$R/} dec tests/hostile/$(basename "$h"): exit status $rc (want 1)"
@@ -156,7 +165,7 @@ mkdir "$D/x2" && (cd "$D/x2" && $C x "$D/a1.fma" >/dev/null 2>&1) && diff -r "$D
 
 # ---- corrupt input ----
 n=0
-# corrupt input: may fail, must not crash or hang (exit status 0 or 1); format 2 has CRCs, so a decode that
+# corrupt input: may fail, must not crash or hang (exit status 0 or 1); files have CRCs, so a decode that
 # succeeds must give the original data
 for t in "text.txt.4.fm4 text.txt" "img_96.rgb.4.fm4 img_96.rgb" "audio_2.pcm.4.fm4 audio_2.pcm" "video_64x48.rgb.4.fm4 video_64x48.rgb" "s1 video_64x48.rgb" "a1.fma -"; do
     set -- $t; o=$D/$1 orig=$D/in/$2
@@ -185,20 +194,20 @@ EOF
 done
 echo "corrupt inputs: $n runs"
 
-# ---- format 1 (version byte 1, header CRC valid) is rejected everywhere: single stream, segment, archive ----
+# ---- another version byte (2, header CRC valid) is rejected everywhere: single stream, segment, archive ----
 # AT = offset of the FM4 stream in the file (8 + 8 in a segmented file or an archive: magic, count, u64 length)
 for t in "text.txt.4.fm4 0" "s1 16" "a1.fma 16"; do
     set -- $t
     python3 -c "
 import sys, zlib, struct
-d = bytearray(open(sys.argv[1], 'rb').read()); at = int(sys.argv[3]); d[at + 3] = 1
+d = bytearray(open(sys.argv[1], 'rb').read()); at = int(sys.argv[3]); d[at + 3] = 2
 d[at + 32:at + 36] = struct.pack('<I', zlib.crc32(bytes(d[at:at + 32])))
-open(sys.argv[2], 'wb').write(d)" "$D/$1" "$D/v1_$1" "$2"
-    rm -rf "$D/v1x"; mkdir "$D/v1x"
+open(sys.argv[2], 'wb').write(d)" "$D/$1" "$D/v2_$1" "$2"
+    rm -rf "$D/v2x"; mkdir "$D/v2x"
     for bin in "$C" $( [ $nb = 1 ] && echo "$B" ); do
-        if [ "$1" = a1.fma ]; then [ "$bin" = "$C" ] || continue; (cd "$D/v1x" && $bin x "$D/v1_$1" . >/dev/null 2>&1); rc=$?
-        else (cd "$D/v1x" && $bin dec "$D/v1_$1" out >/dev/null 2>&1); rc=$?; fi
-        [ $rc = 1 ] && [ -z "$(ls -A "$D/v1x")" ] || bad "$(basename "$bin"): a version-1 stream in $1 was accepted or left files (exit $rc)"
+        if [ "$1" = a1.fma ]; then [ "$bin" = "$C" ] || continue; (cd "$D/v2x" && $bin x "$D/v2_$1" . >/dev/null 2>&1); rc=$?
+        else (cd "$D/v2x" && $bin dec "$D/v2_$1" out >/dev/null 2>&1); rc=$?; fi
+        [ $rc = 1 ] && [ -z "$(ls -A "$D/v2x")" ] || bad "$(basename "$bin"): a version-2 stream in $1 was accepted or left files (exit $rc)"
     done
 done
 if [ $nw = 1 ]; then node -e '
@@ -210,7 +219,7 @@ if [ $nw = 1 ]; then node -e '
     try { fm4.decode(new Uint8Array(fs.readFileSync(process.argv[2]))); } catch (e) { ok += /not an FM4 file/.test(e.message); }
     try { await pool.decode(new Uint8Array(fs.readFileSync(process.argv[3]))); } catch (e) { ok += /not an FM4 file/.test(e.message); }
     process.exit(ok === 2 ? 0 : 1);
-  });' "$R/bpl" "$D/v1_text.txt.4.fm4" "$D/v1_s1" || bad "wasm: a version-1 stream was not rejected"; fi
+  });' "$R/bpl" "$D/v2_text.txt.4.fm4" "$D/v2_s1" || bad "wasm: a version-2 stream was not rejected"; fi
 
 # ---- the file-backed paths (inputs mapped, output written in place, temporary files for big buffers) run
 # only from 64 MB; FM4_BIG=1 runs them on the small inputs: same files, and no temporary files left behind ----
