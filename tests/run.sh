@@ -72,7 +72,14 @@ if [ $nw = 1 ]; then node -e '
   });' "$R/bpl" "$R/tests/large_bb/bb21.fm4" || bad "wasm: a bb=21 stream must fail with a clear out-of-memory error"; fi
 
 # ---- hostile files found by fuzzing (tests/fuzz): each must be rejected, without a crash ----
+# each must also pass the header checks (current magic and version, header CRC), or it would be rejected there
+# and no longer reach the check it was written for
 for h in "$R"/tests/hostile/*.fm4; do
+    python3 -c "
+import sys, zlib, struct
+d = open(sys.argv[1], 'rb').read()
+sys.exit(not (len(d) >= 36 and d[:4] == b'FM4\\x01' and struct.unpack('<I', d[32:36])[0] == zlib.crc32(d[:32])))" "$h" \
+        || bad "tests/hostile/$(basename "$h"): stale header (wrong version or header CRC), the test would not reach its target check"
     for bin in "$C" $( [ $nb = 1 ] && echo "$B" ); do
         $T $bin dec "$h" "$D/d" >/dev/null 2>&1; rc=$?
         [ $rc = 1 ] || bad "${bin#$R/} dec tests/hostile/$(basename "$h"): exit status $rc (want 1)"
@@ -156,7 +163,7 @@ mkdir "$D/x2" && (cd "$D/x2" && $C x "$D/a1.fma" >/dev/null 2>&1) && diff -r "$D
 
 # ---- corrupt input ----
 n=0
-# corrupt input: may fail, must not crash or hang (exit status 0 or 1); format 2 has CRCs, so a decode that
+# corrupt input: may fail, must not crash or hang (exit status 0 or 1); files have CRCs, so a decode that
 # succeeds must give the original data
 for t in "text.txt.4.fm4 text.txt" "img_96.rgb.4.fm4 img_96.rgb" "audio_2.pcm.4.fm4 audio_2.pcm" "video_64x48.rgb.4.fm4 video_64x48.rgb" "s1 video_64x48.rgb" "a1.fma -"; do
     set -- $t; o=$D/$1 orig=$D/in/$2

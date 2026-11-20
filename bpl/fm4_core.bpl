@@ -18,7 +18,7 @@ global HDR: long = 36;    # header size
 global BB_MIN: int = 12;       # table bits a stream may use (c/fm4.c BB_MIN, BB_DEC_MAX); the encoder writes <= 20
 global BB_DEC_MAX: int = 22;
 global CRC_T: *uint = nullptr;
-global G_END: long = 0;   # decoding stops once G_POS passes it (format 2)
+global G_END: long = 0;   # decoding stops once G_POS passes it
 global G_CRC: uint = 0;   # CRC-32 of the data being encoded
 global ANY_FEAT: bool = false;   # fm4AllowAnyParams(): accept files from FEAT/FEAT2/LR experiments (trusted input)
 

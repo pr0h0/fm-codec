@@ -148,7 +148,7 @@ static inline uint32_t *find_bucket(uint32_t *T, int bb, uint32_t h) {
     return v;
 }
 
-/* end: decoding stops once pos passes it (format 2: a valid stream is never read past its last byte) */
+/* end: decoding stops once pos passes it (a valid stream is never read past its last byte) */
 typedef struct { uint32_t x1, x2, x; uint8_t *buf; int64_t len, pos, cap; int dec; int64_t end; } Coder;
 /* the encoder writes into a buffer of L + HDR bytes: a longer result would be stored instead, so when it is
    full, coding stops (pos > end ends run()'s loop) */
