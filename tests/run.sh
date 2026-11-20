@@ -8,6 +8,9 @@ set -u
 # impossible allocation returns NULL as plain malloc does (the code then exits with "out of memory")
 export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0}:exitcode=99:allocator_may_return_null=1" UBSAN_OPTIONS="${UBSAN_OPTIONS:-print_stacktrace=1}:exitcode=99" MSAN_OPTIONS="${MSAN_OPTIONS:-}:exitcode=99:allocator_may_return_null=1"
 R=$(cd "$(dirname "$0")/.." && pwd)
+# every level must run its specialized model copy: a level that ran the general one exits 3 (it would code the
+# same bytes, only slower; see run() in c/fm4.c and runChunk in bpl/fm4_core.bpl)
+export FM4_CHECK_SPEC=1
 C=${FM4:-$R/c/fm4}
 B=$R/bpl/fm4
 D=$(mktemp -d)
@@ -35,9 +38,8 @@ while read -r name mode args; do
         $C dec "$o" "$D/d" && cmp -s "$D/d" "$f" || bad "C round trip $lv $mode $name"
         echo "$name $lv $(hash "$o")" >> "$D/hashes"
         if [ $nb = 1 ]; then
-            # FM4_CHECK_SPEC: every level must run its specialized model copy (else it is only slower, see runChunk)
-            FM4_CHECK_SPEC=1 $B enc $lv $mode $args "$f" "$D/b" && cmp -s "$D/b" "$o" || bad "BPL output differs from C: $lv $mode $name"
-            FM4_CHECK_SPEC=1 $B dec "$o" "$D/d" && cmp -s "$D/d" "$f" || bad "BPL decode $lv $mode $name"
+            $B enc $lv $mode $args "$f" "$D/b" && cmp -s "$D/b" "$o" || bad "BPL output differs from C: $lv $mode $name"
+            $B dec "$o" "$D/d" && cmp -s "$D/d" "$f" || bad "BPL decode $lv $mode $name"
         fi
         echo "$f $o $lv $mode $args" >> "$D/wasm.list"
     done
@@ -109,8 +111,8 @@ for t in "text.txt 2 bytes" "x86.bin 3 bytes" "img_96.rgb 3 image 96" "audio_2.p
     $C dec "$D/g1" "$D/d" && cmp -s "$D/d" "$f" || bad "C segmented round trip $nm"
     echo "$(basename "$f") seg $(hash "$D/g1")" >> "$D/hashes"
     if [ $nb = 1 ]; then
-        FM4_CHECK_SPEC=1 SEG_MB=0.005 $B enc -t 2 $lv "$@" "$f" "$D/gb" && cmp -s "$D/gb" "$D/g1" || bad "BPL segments differ from C: $nm"
-        FM4_CHECK_SPEC=1 $B dec "$D/g1" "$D/d" && cmp -s "$D/d" "$f" || bad "BPL segmented decode $nm"
+        SEG_MB=0.005 $B enc -t 2 $lv "$@" "$f" "$D/gb" && cmp -s "$D/gb" "$D/g1" || bad "BPL segments differ from C: $nm"
+        $B dec "$D/g1" "$D/d" && cmp -s "$D/d" "$f" || bad "BPL segmented decode $nm"
     fi
     if [ $nw = 1 ]; then node -e '
       const fs = require("fs"), [dir, inp, ref, lv, mode, a] = process.argv.slice(1);

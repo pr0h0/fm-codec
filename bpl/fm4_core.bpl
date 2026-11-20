@@ -721,6 +721,12 @@ frame arenaSize(mode: int, bb: int, feat: uint, feat2: uint, L: long, nchan: lon
 # small arrays that are kept in locals while the loop runs. The work is split into calls because
 # WebAssembly engines only switch a function to optimized code when it is entered again: one call
 # for the whole input would run in baseline code to the end.
+# the last fm4Encode / fm4Decode ran the general model copy (FM4_CHECK_SPEC in the CLI; see runChunk)
+@[c_export]
+frame fm4RanGeneral() ret bool {
+    return RAN_GENERAL;
+}
+
 # One copy of the model per level and mode, compiled with its feature bits as constants (run in c/fm4.c):
 # the unused features' code and branches drop out; same output. Other parameter sets (FEAT/FEAT2
 # experiments) run the general copy. The x86 bit (64) only tells the decoder to undo the transform.
@@ -807,10 +813,6 @@ frame runChunk(mode: int, bb: int, limit: int, feat: uint, feat2: uint, widthF: 
 }
 
 
-@[c_export]
-frame fm4RanGeneral() ret bool {
-    return RAN_GENERAL;
-}
 
 @[always_inline, unchecked]
 frame runChunkBody(mode: int, bb: int, limit: int, feat: uint, feat2: uint, widthF: long, data: *u8, L: long, i0: long, i1: long) {
