@@ -1,4 +1,5 @@
 fm4 BPL port: before / after optimization (output byte-identical to c/fm4.c before and after)
+(Written when the Makefile targets were named bpl4/wasm4; they are now `make bpl` and `make wasm`.)
 date: 2026-11-17   cpu: Intel(R) Core(TM) i7-6700 CPU @ 3.40GHz   clang 18.1.3, gcc -O3 -march=native, node v24.20.0
 user seconds (/usr/bin/time -f %U), min of 3 interleaved runs
 before = commit cff7549 (bpl build -O 3 --march native); after = this tree, same flags

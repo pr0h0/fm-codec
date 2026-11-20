@@ -1,262 +1,244 @@
-# fm-codec — model-fraction compression
+# fm4
 
-Lossless compression that represents a whole file as **one number**: the data is the fraction
-`N / 256^k`, and a learned probability model decides how that number is read back.
+A lossless compressor built on context mixing: a learned model predicts every bit, and an
+arithmetic coder turns those predictions into output. It has models for general data (text, code,
+binaries), raw RGB images, 16-bit PCM audio and raw RGB video. It also has an archive mode for files and
+directories.
 
-Started as an experiment to encode data as a fraction `N/D` whose decimal expansion begins with the data
-([research/IDEA.md](research/IDEA.md)). A plain fraction can never be shorter than the data (measured:
-always 1.00×). Letting a predictive model choose the interval widths turns it into context-mixing
-arithmetic coding, which does compress, and that is what this repository implements and benchmarks.
+There are three implementations that write byte-identical files: a C reference, a
+[BPL](https://github.com/pr0h0/bpl3) port that builds natively, and the same port compiled to
+WebAssembly for browsers and Node.
 
-## How it works
+It compresses harder than xz, zstd and FLAC on the data it models, and it is much slower. See
+[Results](#results) and [Caveats](#caveats) before you pick it for anything.
 
-1. Every byte is coded as 8 yes/no decisions. For each bit a **model** predicts `P(bit = 1)`.
-2. The **coder** keeps an interval `[low, high)` inside `[0, 1)`, splits it in proportion to that
-   probability and keeps the half matching the real bit. After the last bit the interval width equals the
-   probability of the whole file, so the number needs about `log2(1/P(data))` bits.
-3. The **model** looks at contexts (previous bytes, or neighbouring pixels and their prediction errors),
-   keeps an adaptive probability per context, and a learned **mixer** combines them. Encoder and decoder
-   run the identical model, so nothing about the model is stored.
-4. Everything is integer arithmetic with a fixed spec, so every implementation produces
-   **byte-identical** files.
+> **Status: pre-release.** The file format (format 1) may still change in ways that old builds can't
+> read. Don't use fm4 for files you need to keep until there is a tagged release.
 
-Image mode (raw RGB24) codes the error of a blended pixel predictor (MED, gradient, cross-channel, …)
-with neighbour-error contexts. It is lossless.
+## Contents
 
-## Implementations
+- [Quick start](#quick-start)
+- [Usage](#usage)
+- [JavaScript and the browser](#javascript-and-the-browser)
+- [Results](#results)
+- [Caveats](#caveats)
+- [How it works](#how-it-works)
+- [Building and testing](#building-and-testing)
+- [Repository layout](#repository-layout)
 
-| Path | What |
-|---|---|
-| `c/fm4.c` | current format (FM4, levels 0–5; bytes, image, audio, video): C reference and spec |
-| `bpl/fm4_core.bpl`, `bpl/fm4_cli.bpl`, `bpl/fm4_wasm.bpl`, `bpl/fm4wasm.mjs`, `bpl/fm4worker.mjs` | FM4 in BPL: core, native CLI, WebAssembly entry, JS host and Web Worker |
-| `c/fm3.c` | previous format (FM3, levels 0–5): C reference and spec |
-| `bpl/fm3_core.bpl`, `bpl/fm3_cli.bpl`, `bpl/fm3_wasm.bpl` | FM3 in BPL: shared core, native CLI, WebAssembly entry |
-| `bpl/fm3wasm.mjs` | JS host for `bpl/fm3.wasm` (browser / Node / Bun), same API as `js/fm3core.mjs` |
-| `js/fm3core.mjs`, `js/fm3.mjs` | FM3 pure JS port (browser-safe core + CLI) |
-| `c/fm2.c` | reference implementation and spec of FM2 (levels 0–5) |
-| `bpl/fm2_core.bpl` | [BPL](https://github.com/pr0h0/bpl3) core, shared by native CLI and WebAssembly |
-| `bpl/fm2_cli.bpl`, `bpl/fm2_wasm.bpl` | native CLI entry and wasm entry |
-| `bpl/fm2wasm.mjs` | JS host for the BPL-built `fm2.wasm` (browser / Node / Bun) |
-| `js/fm2core.mjs`, `js/fm2.mjs` | pure JS port (browser-safe core + CLI) |
-| `c/fm.c`, `js/fm.mjs`, `bpl/fm.bpl` | v1 format (FRC1) |
-| `c/fmx.c` | image-model experiments (feature flags) |
-| `research/` | Python prototypes: plain fraction search, first model-fraction coder, benchmarks |
+## Quick start
+
+You need a C compiler (clang or gcc) and make.
 
 ```bash
-make c                      # C reference (fm3, fm2, ...)
-c/fm3 enc 4 bytes in.txt out.fm3          # fm3, level 0..5
-make bpl wasm bpl3 wasm3 BPL=~/Projects/bpl3/bpl
-c/fm2 enc 4 bytes in.txt out.fm2          # level 0..5
-c/fm2 enc 4 image 2048 in.rgb out.fm2     # raw RGB24, width 2048
-c/fm2 dec out.fm2 restored
+make c                                   # builds c/fm4
+c/fm4 enc 4 bytes notes.txt notes.fm4    # compress at level 4
+c/fm4 dec notes.fm4 notes.txt.out        # decompress
+cmp notes.txt notes.txt.out              # identical
 ```
 
-JS / browser:
+## Usage
 
-```js
-import { encode, decode } from "./js/fm2core.mjs";            // pure JS
-import { loadFm2Wasm } from "./bpl/fm2wasm.mjs";              // BPL -> wasm, same API
-const fm2 = await loadFm2Wasm(await fetch("bpl/fm2.wasm"));
-const packed = fm2.encode(bytes, { level: 4, mode: "image", width: 2048 });
+```
+fm4 enc LEVEL bytes IN OUT                 any file
+fm4 enc LEVEL image WIDTH IN OUT           raw RGB24 pixels, WIDTH pixels per row
+fm4 enc LEVEL audio CHANNELS IN OUT        raw 16-bit little-endian PCM, 1-8 channels
+fm4 enc LEVEL video WIDTH HEIGHT IN OUT    raw RGB24 frames
+fm4 dec IN OUT                             decompress (mode and level are read from the file)
+fm4 enc|dec -t N ...                       processes for large inputs (default: all cores)
+
+fm4 a [-m auto|bytes] [-t N] LEVEL OUT PATH...   archive files and directories
+fm4 x [-t N] ARCHIVE [DIR]                       extract
 ```
 
-## fm4 (current: `c/fm4.c`, `bpl/fm4_*.bpl`)
+**Levels** run from 0 (store) to 5. Each level adds models: more contexts, a second match model,
+indirect and sparse contexts, more mixers. Higher levels compress better and run slower. Level 4 is a
+good default.
 
-fm4 adds to fm3: an online least-squares (OLS) pixel predictor, a 2-D match model and exact-colour
-contexts for images; four text contexts, a fourth mixer, mixer selection by context hit count and
-(level 5) per-context run inputs for text; a 16-bit mixer; and two new modes, **audio** (16-bit PCM)
-and **video** (raw RGB frames, uses the previous frame). Input of 128 MB or more, in any mode, is cut into
-size / 64 MB runs of whole units (bytes; image rows; video frames; audio samples of every channel), coded
-and decoded in parallel (container `FMS\x01`, see `c/fm4.c`); the cut depends only on the data, so the file
-is the same for any thread count. Each segment costs its model's memory (60-630 MB by level).
-256 MB of mixed data (a tar of text, code and binaries), bytes level 1: 4 segments, +1.9% size,
-158 s -> 62 s, decode 163 s -> 63 s. Video, 24 s 270x480 (280 MB raw): 4 segments, +3.0% size,
-590 s -> 150 s, decode 607 s -> 153 s; 3 min 320x180 (933 MB): 13 segments, +4.7%, 2011 s -> 469 s
-(4 cores, 8 threads). Smaller inputs stay one FM4 stream; `SEG_MB` sets the segment size.
-The model is compiled once per level and mode with its feature bits as constants (C, BPL native and wasm;
-same output): bytes level 1 is about 35% faster than one general copy, levels 2-5 10-16%, image levels
-1-3 35-40%. It makes `fm4.wasm` 355 KB (97 KB gzipped) instead of 62 KB.
-The native BPL build (`bpl/fm4`, same `-t N`) and the browser build (`createFm4()` below) write and read
-the same segmented files.
+**Modes** must match the data. The image, audio and video modes expect raw samples, not PNG, WAV or MP4
+files. Convert first, for example with ffmpeg:
 
-**In the browser** `bpl/fm4wasm.mjs` + `bpl/fm4worker.mjs` + `bpl/fm4.wasm` (serve them side by side):
+```bash
+ffmpeg -i photo.png -f rawvideo -pix_fmt rgb24 photo.rgb       # then: c/fm4 enc 4 image <width> photo.rgb photo.fm4
+ffmpeg -i talk.wav -f s16le -acodec pcm_s16le talk.pcm         # then: c/fm4 enc 4 audio <channels> talk.pcm talk.fm4
+ffmpeg -i clip.mp4 -f rawvideo -pix_fmt rgb24 clip.rgb         # then: c/fm4 enc 4 video <width> <height> clip.rgb clip.fm4
+```
+
+The decoder needs nothing but the file: `fm4 dec` restores the raw bytes. Wrapping them back into
+PNG, WAV or MP4 is up to you.
+
+**Archives** (`fm4 a`) compress all files as one solid stream, sorted by extension so similar files share
+context. The PCM inside 16-bit WAV files goes through the audio model, and the pixels of 24-bit BMP and
+PPM files through the image model; `-m bytes` turns that off. Already-compressed files (PNG, JPEG, MP4,
+zip) are detected and stored. Permissions and empty directories are kept; symlinks and timestamps are not.
+
+```bash
+c/fm4 a 4 project.fma src/ docs/ README.md
+c/fm4 x project.fma restored/
+```
+
+**Large inputs.** Inputs of 128 MB and more are cut into 64 MB segments, which are coded in parallel. This
+costs 2-5% of size. Archives cut their solid data into parts of at least 8 MB. The output is the same
+for any `-t`. The native builds memory-map their input and write output through temporary files, so
+files larger than RAM work.
+
+**Environment variables** (mostly for experiments):
+
+| Variable | Effect |
+|---|---|
+| `SEG_MB` | segment size in MB (default 64) |
+| `PART_MB` | archive part size in MB (default 8) |
+| `FEAT`, `FEAT2`, `BB`, `LR` | override the model's feature bits, table size, mixer rate |
+| `FM4_ANY_FEAT=1` | decode files made with `FEAT`/`FEAT2`/`LR` (trusted input only) |
+| `HUGE=0` | don't use huge pages for the tables |
+
+## JavaScript and the browser
+
+`bpl/fm4.wasm` with `bpl/fm4wasm.mjs` and `bpl/fm4worker.mjs` runs in browsers, Node and Bun. Serve the
+three files side by side. `fm4.wasm` comes from `make wasm` and needs the BPL compiler (see
+[Building](#building-and-testing)).
 
 ```js
 import { createFm4 } from "./bpl/fm4wasm.mjs";
-const fm4 = await createFm4(new URL("./bpl/fm4.wasm", import.meta.url), { threads: 4 }); // default min(cores, 4)
-const packed = await fm4.encode(rgb, { level: 4, mode: "video", width: 640, height: 360 }); // or bytes/image/audio
-const back = await fm4.decode(packed);
+
+const fm4 = await createFm4(new URL("./bpl/fm4.wasm", import.meta.url), { threads: 4 });
+
+const packed = await fm4.encode(bytes, { level: 4 });                                  // bytes mode
+const img = await fm4.encode(rgb, { level: 4, mode: "image", width: 1920 });
+const pcm = await fm4.encode(samples, { level: 4, mode: "audio", channels: 2 });
+const vid = await fm4.encode(frames, { level: 4, mode: "video", width: 640, height: 360 });
+
+const original = await fm4.decode(packed);                                             // Uint8Array
 ```
 
-All coding runs in Web Workers (module workers: Chrome 91+, Firefox 114+, Safari 16.4+), so the page
-stays responsive; segments are coded one per worker. Each worker typically needs 300-800 MB of
-wasm memory (about 500 MB for a 64 MB video segment), less for inputs under 64 KB (2 KB: about 80 MB),
-hence the default of at most 4. (Files from `BB=21`/`22` experiments need 2.3-4.5 GB and decode only natively.) Single streams run at about
-half the native speed; only segmented input (128 MB and more) runs in parallel. `bench/browser/fm4_browser.sh` checks the
-output against `c/fm4` in headless Chromium. `loadFm4Wasm()` is the synchronous single-instance API
-(Node, Bun, inside a worker).
+- **Workers.** `createFm4` runs all coding in Web Workers (module workers: Chrome 91+, Firefox 114+,
+  Safari 16.4+), so the page stays responsive. Large inputs are coded one segment per worker.
+- **Memory.** Each worker needs about 300-800 MB of wasm memory, which is why the default is at most 4
+  workers. Inputs under 64 KB need much less (2 KB: about 80 MB).
+- **Speed.** Single streams run at about half the native speed.
+- **Synchronous API.** `loadFm4Wasm(bytes)` is a synchronous single-instance API for Node, Bun or code
+  already running inside a worker.
 
-```bash
-make c bpl4 wasm4 BPL=~/Projects/bpl3/bpl     # BPL needs bpl3 staging 80d04313 or later
-make test                                     # tests/run.sh: all modes/levels, builds agree, archives, corrupt input
-make sanitize                                 # the same on ASan+UBSan and MSan builds of c/fm4 (clang)
-make fuzz                                     # libFuzzer: decoder and round trip, FUZZ_SECONDS each (tests/fuzz)
-c/fm4 enc 4 bytes in.txt out.fm4              # levels 0..5
-c/fm4 enc 4 image 2048 in.rgb out.fm4         # raw RGB24, width
-c/fm4 enc 4 audio 2 in.pcm out.fm4            # raw 16-bit little-endian PCM, channels
-c/fm4 enc 4 video 640 360 in.rgb out.fm4      # raw RGB24 frames, width height
-c/fm4 dec out.fm4 restored                    # -t N after enc/dec: processes for segments (default: all cores)
-c/fm4 a 4 out.fma dir file ...                # archive files and directories (C only)
-c/fm4 a -m bytes 4 out.fma dir                # same, without the audio/image models
-c/fm4 a -t 1 4 out.fma dir                    # one process (default: all cores); same file for any -t
-c/fm4 x out.fma destdir                       # extract (also parallel)
-```
+The wasm build reads and writes the same files as the native builds, segmented ones included. It can't
+decode files from `BB=21`/`22` experiments, which need more than 2 GB.
 
-**Data larger than RAM:** the native builds (`c/fm4`, `bpl/fm4`) don't keep the data in memory. Inputs are
-memory-mapped, decoded output is written straight into a mapping of a new temporary file `OUT.fm4-XXXXXX`
-(renamed to `OUT` when complete; removed on failure and on Ctrl-C/SIGTERM), and buffers of 64 MB and more
-(encoder output, archive data, segment results, the E8/E9-transformed copy of a large executable) live in
-unlinked temporary files next to the output. The kernel can page all of it out, so only the model's tables (up
-to about 1.2 GB per process) need memory: under a 1 GB memory limit a 3 GB file encodes and decodes (the
-previous build was killed), and a 1.2 GB text file encodes at level 1 under 512 MB.
+## Results
 
-Disk: decoding reserves the output's size up front (Linux, and macOS in C), so a full disk is an error instead
-of a crash; the BPL build on macOS can only extend the file. Encoding needs free space of up to about twice the
-input (the reserved encoder buffer, plus an E8/E9 copy for executables) besides the output. When a temporary
-buffer can't be created, it falls back to memory. Windows reads and writes files in memory.
+Compressed size / original size, smaller is better. Native C build, one thread, Intel i7-6700. fm4's
+encode and decode times are about equal.
 
-**Platforms:** `c/fm4.c` builds on Linux, macOS and Windows (MinGW-w64, e.g. MSYS2 UCRT64:
-`make c/fm4 CC=gcc`); CI runs the test suite on Linux x86-64, macOS arm64 and Windows, and the locked output
-hashes must match on all three (the model uses IEEE double arithmetic without FMA contraction, and of libm
-only `sqrt` and `floor`, which IEEE 754 defines exactly). On Windows segments and archive streams are coded one after another (no `fork`);
-the output is the same.
+| | Python source, 4 MB | x86-64 code, 4 MB | Photo-like image, 2048x1152 RGB | Speed, MB/s (source / image) | Memory, MB (source / image) |
+|---|---:|---:|---:|---:|---:|
+| fm4 level 1 | 0.130 | 0.330 | 0.389 | 2.7 / 2.4 | 60 / 24 |
+| fm4 level 2 | 0.114 | 0.307 | 0.346 | 1.0 / 1.4 | 125 / 148 |
+| fm4 level 3 | 0.102 | 0.290 | 0.341 | 0.67 / 0.92 | 315 / 180 |
+| fm4 level 4 | 0.094 | 0.270 | 0.336 | 0.41 / 0.51 | 347 / 244 |
+| fm4 level 5 | **0.092** | **0.265** | **0.332** | 0.27 / 0.40 | 619 / 244 |
+| xz -9e | 0.134 | 0.363 | 0.665 | | |
+| zstd -19 | 0.137 | 0.381 | 0.742 | | |
+| gzip -9 | 0.198 | 0.479 | 0.803 | | |
+| PNG (max compression) | | | 0.549 | | |
+| JPEG XL lossless, effort 7 | | | 0.352 | | |
 
-**Integrity:** files are format 1 (`FM4\x01`, 36-byte header, described at the top of `c/fm4.c`) with a
-CRC-32 of the header and of the original data. A corrupt file is rejected, never decoded to wrong data: the
-header CRC and a bound of L to about 2840x the payload stop a bad length before anything is allocated
-(also for every stream of an archive or segmented file, before their lengths are added up),
-decoding stops once it reads past the payload, and the data CRC is checked at the end. Until a first release
-format 1 is the only format and may still change without old builds being able to read the new files;
-from then on, a new version is introduced only when existing decoders could not read the files.
-Decoders accept only the parameter sets the encoder's levels write (feature bits, table size, counter
-limit, mixer rate) and whole pixels, frames or samples, since other combinations would index past the model's
-arrays; files from `FEAT`/`FEAT2`/`LR` experiments need `FM4_ANY_FEAT=1` to decode with `c/fm4` or `bpl/fm4`
-(trusted input only; the wasm build always rejects them).
-`tests/fuzz/replay.py` replays fuzzing corpora through C and BPL and requires identical results;
-`tests/hostile/` keeps the inputs fuzzing found.
+Raw numbers: [bench/results/fm4_levels.txt](bench/results/fm4_levels.txt).
 
-**Archives** (`FMA`, format described above `archive()` in `c/fm4.c`): all files are sorted by extension
-and compressed as one stream, so small similar files share context. The PCM data of 16-bit WAV files
-goes through the audio model and the pixels of 24-bit BMP (width a multiple of 4) and PPM files through
-the image model, each as its own stream; `-m bytes` turns that off. Files that look already compressed
-(byte entropy above 7.8 bits: PNG, JPEG, MP4, zip) are stored. Permissions and empty directories are
-kept; symlinks and timestamps are not. Streams are coded and decoded in parallel (one process each, about
-350–420 MB of memory per process). Solid data is cut into size / 8 MB equal parts (so parts are at least
-8 MB); the cut depends only on the data, so the archive is byte-identical for any `-t` and any machine.
-A 32 MB tar: 3 parts, 4,516,281 bytes in 31 s, extract 32 s (one stream: 4,369,452 bytes, 106 s;
-`xz -9e` 5,839,928). A source tree with binaries (80 files, 4.18 MB): level 4
-276,794 bytes in 13.7 s, level 2 411,136 in 3.8 s; `tar | xz -9e` 404,800, `zstd -19` 443,387,
-`zip -9` 935,388. `-m bytes` is not a speed-up at the same level (a WAV at level 4: 1.9 s and 69 KB
-with the audio model, 2.3 s and 167 KB without); use a lower level for speed.
+**Audio** (12 clips of 20 s; speech, music, saxophone), level 4: 0.097-0.530 of raw, 6-45% smaller than
+`flac -8` on every clip. The same clips in bytes mode, without the audio model, come out 5-60% larger
+than FLAC.
 
-Measured on a corpus built from a source tree (`tools/make_corpus.sh`: 10 text types, 20 images) plus
-the earlier test files, fm4 vs fm3 at level 4: text and code -1.9% mean (level 5: -3.3%), images
--15.2% mean (up to -36% on screenshots); every file is smaller.
+**Video** (10 frames 640x360), level 4:
 
-| Media (level 4, compressed / raw) | fm4 | best other tool |
+| Clip | fm4 | best other tool |
 |---|---:|---:|
-| Audio, 12 clips of 20 s (speech, music, sax) | 0.097 - 0.530 | flac -8: 0.137 - 0.601 (fm4 is 6-45% smaller on every clip) |
-| Video, 10 frames 640x360: screen recording | 0.0055 | lossless x264: 0.0091 |
-| Video: stick-figure animation | 0.0110 | xz: 0.0204, x264: 0.0224 |
-| Video: animated background | 0.0532 | xz: 0.0942, ffv1: 0.1182 |
-| Video: camera footage | 0.2066 | ffv1: 0.2408 |
+| screen recording | 0.0055 | xz -9e: 0.0071 |
+| stick-figure animation | 0.0110 | xz -9e: 0.0204 |
+| animated background | 0.0532 | xz -9e: 0.0942 |
+| camera footage | 0.2066 | ffv1: 0.2408 |
 
-Without the audio model (bytes mode) the same audio clips come out 5-60% larger than FLAC. The video
-mode has no motion compensation, so camera footage gains little over coding the frames as one image.
-Raw numbers: `bench/results/media_fm4.txt`.
+The video model has no motion compensation, so camera footage gains little. Raw numbers:
+[bench/results/media_fm4.txt](bench/results/media_fm4.txt).
 
-The BPL build produces byte-identical files (native and WebAssembly) and runs at the same speed as the
-C build (clang) within about 2% in every mode; the wasm build runs the model in 16 KB chunks so browsers switch to optimized code.
-`bench/results/fm4_c_vs_bpl.txt`, `fm4_bpl_opt.txt`. There is no JS port of fm4 yet (fm3 has one).
+**Archives.** A source tree with binaries (80 files, 4.18 MB) at level 4 came out at 276,794 bytes. For
+comparison: `tar | xz -9e` 404,800, `zstd -19` 443,387, `zip -9` 935,388.
 
-fm4 is slow: about 0.3 MB/s for text and images at level 4, 0.2-0.4 MB/s for audio.
-The OLS predictor uses floating point; identical output across builds relies on IEEE doubles without
-fused multiply-add (`-ffp-contract=off` in the Makefile).
+## Caveats
 
-## fm3 (previous format, C reference: `c/fm3.c`)
+- **Slow.** About 0.3-2.7 MB/s per core depending on level (table above), against tens to hundreds of
+  MB/s for zstd. Decoding is as slow as encoding: the decoder has to run the same model.
+- **Memory.** 24-630 MB per process depending on level, and each parallel segment or archive part is
+  its own process. Archives use about 350-420 MB per process.
+- **Pre-release format.** Format 1 may still change in ways that old builds can't read.
+- **Raw media only.** The image, audio and video modes take raw RGB24 or 16-bit PCM, and you have to give
+  the width, channel count or frame size. fm4 doesn't parse PNG, WAV or video containers except inside
+  archives (WAV, BMP, PPM).
+- **No streaming.** fm4 works on whole files. It can't read stdin or write stdout, and it can't
+  decompress part of a file.
+- **Archives** don't keep symlinks or timestamps.
+- **Platforms.** It is developed on Linux x86-64. macOS arm64 and Windows (MinGW-w64) build and pass
+  the tests in CI, but get less use. On Windows, segments and archive parts are coded one after another
+  instead of in parallel.
+- **Not audited.** The decoders are fuzzed and reject corrupt input (see
+  [docs/internals.md](docs/internals.md#integrity-and-hostile-input)), but nobody has reviewed them for
+  security.
 
-fm3 replaces fm2's per-bit hash slots with checksummed 64-byte nibble buckets (one cache line per
-context per 4 bits), and adds: two match models, word / word-pair / column contexts, indirect
-contexts, sparse contexts and an x86 E8/E9 transform for binaries, 7-bit history per context mapped
-through adaptive tables, a 3-mixer network with a learned final mixer, and three APM stages.
-Image mode blends 9 predictors weighted by recent local error (1/err), with 16 contexts.
+## How it works
 
-| Level | bytes | image |
-|---|---|---|
-| 0 | store | store |
-| 1 | orders 1–3 + match model | MED predictor, 6 contexts |
-| 2 | orders 0–4,6, match, words, 2 mixers + APM | 9-predictor blend, 12 contexts |
-| 3 | + 2nd match, indirect, sparse, column, more APMs | + 2 mixers + APM |
-| 4 | + bit-history inputs, orders 5/7, 3-mixer network | + 4 contexts, 3-mixer network |
-| 5 | level 4 with 2x tables | level 4, two blend weightings tried |
+1. Every byte is coded as 8 yes/no decisions. For each bit the **model** predicts the probability that
+   it is 1.
+2. The **arithmetic coder** keeps an interval inside [0, 1). It splits the interval in proportion to the
+   prediction and keeps the part that matches the real bit. A well-predicted bit costs only a fraction of
+   a bit of output.
+3. The model looks at many **contexts**: the previous bytes, words, columns, matches with earlier data,
+   or neighbouring pixels and their prediction errors. It keeps an adaptive probability for each, and
+   small **mixers** (logistic regression, trained as it goes) combine them into one prediction.
+4. The decoder runs the identical model on the bits decoded so far, so nothing about the model is
+   stored in the file.
 
-Incompressible input falls back to store. x86 code is detected and E8/E9-transformed automatically.
+The whole file becomes one number in [0, 1), with as many digits as the model's predictions call for.
+The project started as an attempt to encode files as plain fractions; [docs/history.md](docs/history.md)
+tells how it got here.
 
-### Results (ratio = output / input, smaller is better)
+More detail (the model, the file formats, integrity checks, large-data handling, determinism):
+[docs/internals.md](docs/internals.md). The format spec is the comment at the top of
+[`c/fm4.c`](c/fm4.c).
 
-| Data | fm3 L1 | fm3 L2 | fm3 L4 | fm3 L5 | fm2 L4 | xz -9e | 7z PPMd | zpaq -m5 | JPEG XL e9 |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 10 MB source code | 0.160 | 0.141 | 0.119 | **0.118** | 0.184 | 0.162 | 0.146 | 0.122 | — |
-| 3.3 MB English prose | 0.197 | 0.173 | 0.158 | **0.157** | 0.215 | 0.208 | 0.180 | 0.160 | — |
-| 10 MB x86-64 binary | 0.316 | 0.295 | 0.261 | **0.259** | 0.375 | 0.340 | 0.326 | 0.281 | — |
-| 7 MB photo-like image (raw RGB) | 0.390 | 0.347 | **0.341** | 0.341 | 0.349 | 0.665 | 0.651 | 0.501 | 0.347 |
-| 0.4 MB busy illustration | 0.547 | 0.501 | 0.494 | **0.493** | 0.4995 | 0.647 | 0.672 | 0.571 | 0.501 |
-| 0.3 MB character image | 0.234 | 0.208 | **0.205** | 0.205 | 0.209 | 0.315 | 0.281 | 0.237 | 0.212 |
-
-All FM3 implementations (C, BPL native, BPL→wasm, JS) produce byte-identical files.
-
-Speed by implementation (text 10 MB / 7 MB image, level 4, encode): C 26 s / 11 s, BPL native
-(`--march native`) 31–34 s / 14 s (BPL keeps bounds/null/stack checks it cannot turn off, which cost
-15–25% once the code is compute-bound). In the browser (Chromium 156) BPL→wasm and the JS port run at
-about the same speed (JS ~25% faster on the large image at L4); in Bun the wasm build avoids JS JIT
-stalls. Raw numbers: `bench/results/fm3_c_vs_bpl.txt`, `bench_wasm3_*.txt`, `bench_browser3_chromium.txt`.
-
-Speed (C, single thread, i7-6700, MB/s encode; decode is the same):
-L1 2.2 (text) / 1.9 (image), L2 1.0 / 1.0, L3 0.6 / 0.8, L4 0.36 / 0.6. Peak memory: L1 12–67 MB,
-L2 ~130 MB, L3/L4 ~250–290 MB, L5 ~500 MB. Full numbers: `bench/results/fm3_levels_c.txt`.
-
-## FM2 (previous format; C, BPL native + wasm, JS)
-
-| Level | bytes mode | image mode |
-|---|---|---|
-| 0 | store | store |
-| 1 | order-2 context, no mixer (fastest) | MED predictor, 3 contexts |
-| 2 | orders 1–3 mixed | MED, 6 contexts |
-| 3 | orders 0–4,6 mixed (= v1 model) | 5-predictor blend, 9 contexts |
-| 4 | + second mixer + APM | 9-predictor blend, 12 contexts, second mixer, APM |
-| 5 | 3 passes, smallest wins | same as 4 |
-
-### FM2 results
-
-Ratio = output / input (smaller is better). Speeds are single-threaded encode, C build.
-
-| Data | fm2 L1 | fm2 L4 | fm2 L5 | gzip -9 | xz -9e | 7z PPMd | zpaq -m5 | JPEG XL e9 |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| 10 MB source code | 0.280 | 0.184 | 0.178 | 0.225 | 0.162 | 0.146 | 0.122 | — |
-| 7 MB photo-like image (raw RGB) | 0.392 | 0.349 | 0.349 | 0.803 | 0.665 | 0.651 | 0.501 | 0.347 |
-| 0.3 MB character image | 0.241 | 0.209 | 0.209 | 0.387 | 0.315 | 0.281 | 0.237 | 0.212 |
-| 0.4 MB busy illustration | 0.553 | 0.4995 | 0.4995 | 0.730 | 0.647 | 0.672 | 0.571 | 0.501 |
-
-Speed (MB/s, encode; decode is the same): C L1 7.3 (text) / 2.1 (image), L4 0.65 / 0.31.
-BPL native is within ±7% of C at levels 2–4 (23% slower at level 1), BPL→wasm runs at ~60–75% of native
-and is 1.1–1.5× faster than the pure JS port in Node and Chromium. Raw numbers: [bench/results](bench/results).
-
-## Benchmarks
+## Building and testing
 
 ```bash
-tools/make_testdata.sh            # testdata/ from system files; put your own images in testdata/images/
-bench/bench.sh                    # v1 ports
-bench/archivers_bench.sh FILE...  # gzip, zip, bzip2, xz, zstd, 7z, rar, zpaq (whatever is installed)
-bench/imgcodecs_bench.sh IMG...   # PNG, QOI, JPEG-LS, JPEG 2000, FFV1, WebP, JPEG XL, AV1 (ffmpeg)
-node bench/bench_wasm.mjs         # JS port vs BPL wasm (also with bun)
+make c                               # c/fm4 (C reference)
+make bpl wasm BPL=/path/to/bpl       # bpl/fm4 (native) and bpl/fm4.wasm
+make test                            # tests/run.sh
+make sanitize                        # the tests on ASan+UBSan and MSan builds (clang)
+make fuzz                            # libFuzzer harnesses, FUZZ_SECONDS each (default 60)
 ```
+
+- **C.** `c/fm4.c` is one file with no dependencies beyond libc and libm. It builds on Linux, macOS and
+  Windows (MinGW-w64, e.g. MSYS2 UCRT64: `make c/fm4 CC=gcc`). Keep `-ffp-contract=off` if you build by
+  hand: identical output across builds depends on it.
+- **BPL.** The BPL builds need the [bpl3](https://github.com/pr0h0/bpl3) compiler (staging 80d04313 or
+  later), clang and wasm-ld.
+- **Tests.** `tests/run.sh` round-trips every mode and level, checks that C, BPL native and wasm write
+  identical files (testing whichever builds exist), covers archives, segments and corrupt input, and
+  compares output hashes against `tests/expected.txt`. A change to those hashes is a format change.
+  `UPDATE=1 tests/run.sh` rewrites the file.
+- **Benchmarks.** `tools/make_testdata.sh` builds benchmark inputs from files on a Linux system into
+  `testdata/` (not in git). `bench/archivers_bench.sh` and `bench/imgcodecs_bench.sh` run other tools
+  on the same inputs.
+
+## Repository layout
+
+| Path | Contents |
+|---|---|
+| `c/fm4.c` | C reference implementation and format spec |
+| `bpl/fm4_core.bpl` | BPL port: model and coder |
+| `bpl/fm4_cli.bpl`, `bpl/fm4_wasm.bpl` | native command line and WebAssembly entry points |
+| `bpl/fm4wasm.mjs`, `bpl/fm4worker.mjs` | JavaScript host and Web Worker for `fm4.wasm` |
+| `tests/` | test suite, fuzzing harnesses, hostile inputs, locked output hashes |
+| `bench/` | benchmark scripts, the browser check, recorded results |
+| `tools/` | scripts that build benchmark inputs |
+| `docs/` | internals and project history |
+| `research/` | the original fraction-encoding idea and Python prototypes |
+
+## License
+
+[Apache License 2.0](LICENSE), the same as [bpl3](https://github.com/pr0h0/bpl3).

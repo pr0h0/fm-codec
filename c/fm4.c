@@ -1326,7 +1326,7 @@ bad:
    2 x SEG_MB (default 64 MB) are cut into L / SEG_MB equal runs of whole units (bytes: a byte; image: a row;
    video: a frame; audio: a sample of every channel), so the cut depends only on the data, never on the thread
    count; smaller inputs stay one plain FM4 stream. Each segment is an independent stream, coded in parallel
-   (each costs its model's memory: 60-630 MB by level). */
+   (each costs its model's memory: 24-630 MB by level). */
 static int64_t seg_unit(int mode, int64_t width) {
     return mode == 2 ? 3 * (width & 0xFFFF) * ((width >> 16) ? width >> 16 : 1) : mode == 3 ? 2 * width : 1;
 }
